@@ -48,7 +48,7 @@ def setup_logging(verbose: bool = False) -> None:
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
     # Quiet noisy libraries
-    for lib in ("httpx", "httpcore", "asyncio", "urllib3", "hpack"):
+    for lib in ("httpx", "httpcore", "asyncio", "urllib3", "hpack", "mitmproxy"):
         logging.getLogger(lib).setLevel(logging.WARNING)
 
 

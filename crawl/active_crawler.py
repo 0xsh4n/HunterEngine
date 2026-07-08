@@ -12,6 +12,7 @@ import json
 import logging
 import shutil
 import tempfile
+import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -20,6 +21,9 @@ from core.rate_limiter import RateLimiter
 from core.waf_bypass import WAFBypass
 
 logger = logging.getLogger("hunterengine.crawl.active")
+
+# Regex to strip ANSI escape codes
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 class ActiveCrawler:
@@ -30,7 +34,7 @@ class ActiveCrawler:
         rate_limiter: Optional[RateLimiter] = None,
         waf_bypass: Optional[WAFBypass] = None,
         max_depth: int = 5,
-        timeout: int = 600,
+        timeout: int = 3600,
     ) -> None:
         self.rate_limiter = rate_limiter
         self.waf_bypass = waf_bypass
@@ -120,10 +124,11 @@ class ActiveCrawler:
             js_files = set()
 
             for line in stdout.decode().strip().splitlines():
-                if not line.strip():
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if not clean_line:
                     continue
                 try:
-                    data = json.loads(line)
+                    data = json.loads(clean_line)
                     url = data.get("request", {}).get("endpoint", "") or data.get("endpoint", "")
                     if not url:
                         continue
@@ -140,7 +145,7 @@ class ActiveCrawler:
                         js_files.add(url)
                 except json.JSONDecodeError:
                     # Plain URL output
-                    url = line.strip()
+                    url = clean_line
                     endpoints.append({"url": url, "method": "GET", "source": "katana"})
                     if url.endswith(".js"):
                         js_files.add(url)
@@ -175,12 +180,12 @@ class ActiveCrawler:
             js_files = set()
 
             for line in stdout.decode().strip().splitlines():
-                line = line.strip()
-                if not line:
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if not clean_line:
                     continue
                 # gospider output: [source] [type] - URL
-                parts = line.split(" - ", 1)
-                url = parts[-1].strip() if parts else line
+                parts = clean_line.split(" - ", 1)
+                url = parts[-1].strip() if parts else clean_line
                 if url.startswith("http"):
                     endpoints.append({"url": url, "method": "GET", "source": "gospider"})
                     if url.endswith(".js"):
@@ -208,11 +213,11 @@ class ActiveCrawler:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
 
                 for line in stdout.decode().strip().splitlines():
-                    u = line.strip()
-                    if u.startswith("http"):
-                        endpoints.append({"url": u, "method": "GET", "source": "hakrawler"})
-                        if u.endswith(".js"):
-                            js_files.add(u)
+                    clean_line = ANSI_ESCAPE.sub('', line).strip()
+                    if clean_line.startswith("http"):
+                        endpoints.append({"url": clean_line, "method": "GET", "source": "hakrawler"})
+                        if clean_line.endswith(".js"):
+                            js_files.add(clean_line)
             except Exception as e:
                 logger.debug(f"hakrawler failed for {url}: {e}")
 
