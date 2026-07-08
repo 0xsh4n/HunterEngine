@@ -137,6 +137,8 @@ def crawl(
     max_depth: int = typer.Option(10, "--max-depth", help="Maximum click-depth"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode (no visible window)"),
     no_forms: bool = typer.Option(False, "--no-forms", help="Disable automatic form filling and submission"),
+    keep_open: float = typer.Option(5.0, "--keep-open", help="Seconds to keep browser open after crawl finishes"),
+    slow_mo: int = typer.Option(150, "--slow-mo", help="Slow down browser actions by this many milliseconds (headed mode only)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
     """
@@ -167,6 +169,8 @@ def crawl(
         max_pages=max_pages,
         max_depth=max_depth,
         form_submit=not no_forms,
+        keep_open=keep_open,
+        slow_mo=slow_mo,
     )
 
     async def run_crawl():

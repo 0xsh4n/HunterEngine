@@ -21,6 +21,7 @@ import re
 import string
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -59,19 +60,24 @@ class NavigatorConfig:
     headless: bool = False                # False = visible browser (ZAP-style)
     max_pages: int = 500                  # Stop after visiting this many pages
     max_depth: int = 10                   # Max click-depth from the seed URL
-    page_timeout: int = 30_000            # Per-page navigation timeout (ms)
-    action_delay: tuple[float, float] = (0.3, 1.2)  # Human-like pause between actions
+    page_timeout: int = 45_000            # Per-page navigation timeout (ms)
+    wait_after_load: float = 3.0          # Seconds to wait after page load for JS to render
+    action_delay: tuple[float, float] = (0.4, 1.5)  # Human-like pause between actions
+    slow_mo: int = 150                    # Playwright slow_mo (ms) — makes headed mode watchable
     form_submit: bool = True              # Auto-fill and submit forms
     click_buttons: bool = True            # Click buttons and interactive elements
     click_navigation: bool = True         # Click nav menus, dropdowns, tabs
     intercept_network: bool = True        # Capture XHR / fetch / WS traffic
     screenshot_on_new_page: bool = True   # Screenshot each unique page
     screenshot_dir: str = "data/screenshots"
+    keep_open: float = 5.0                # Seconds to keep browser open after crawl finishes
     viewport: dict[str, int] = field(default_factory=lambda: {"width": 1366, "height": 768})
     chromium_args: list[str] = field(default_factory=lambda: [
         "--disable-gpu",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--ignore-certificate-errors",
+        "--disable-blink-features=AutomationControlled",
     ])
     proxy_url: str = ""                   # Optional proxy (e.g. mitmproxy)
     user_agent: str = ""                  # Custom UA; empty = default Chromium
@@ -156,6 +162,9 @@ class AutoNavigator:
         self._screenshots_taken: int = 0
         self._page_count: int = 0
         self._start_time: float = 0.0
+        self._current_url: str = ""
+        self._status_message: str = "Starting..."
+        self._errors: list[str] = []
 
         # Playwright handles
         self._pw: Any = None
@@ -191,7 +200,14 @@ class AutoNavigator:
             logger.warning("No in-scope seed URLs provided")
             return self._results()
 
-        await self._launch_browser()
+        try:
+            await self._launch_browser()
+        except Exception as exc:
+            logger.error("Failed to launch browser: %s", exc)
+            console.print(f"[bold red]Error launching browser:[/bold red] {exc}")
+            console.print("[yellow]Make sure Playwright browsers are installed:[/yellow]")
+            console.print("  [cyan]playwright install chromium[/cyan]")
+            return self._results()
 
         try:
             # Live Rich dashboard in the terminal alongside the visible browser
@@ -208,13 +224,33 @@ class AutoNavigator:
 
                     self._visited_urls.add(url)
                     self._page_count += 1
+                    self._current_url = url
+                    self._status_message = f"Navigating (depth {depth})"
+
+                    live.update(self._build_dashboard())
 
                     try:
                         await self._navigate_and_explore(url, depth)
+                        self._status_message = "Exploring page..."
                     except Exception as exc:
+                        err_msg = f"{url}: {exc}"
                         logger.debug("Failed to explore %s: %s", url, exc)
+                        self._errors.append(err_msg[:120])
+                        self._status_message = f"Error on page, continuing..."
 
                     live.update(self._build_dashboard())
+
+                # End of crawl
+                self._status_message = "Crawl complete!"
+                live.update(self._build_dashboard())
+
+            # Keep the browser open so the user can see the final state
+            if self.config.keep_open > 0 and not self.config.headless:
+                console.print(
+                    f"\n[dim]Browser stays open for {self.config.keep_open:.0f}s "
+                    f"— review the last page...[/dim]"
+                )
+                await asyncio.sleep(self.config.keep_open)
 
         finally:
             await self._close_browser()
@@ -237,20 +273,26 @@ class AutoNavigator:
         proxy = None
         if self.config.proxy_url:
             proxy = {"server": self.config.proxy_url}
-            launch_args.append("--ignore-certificate-errors")
 
+        # slow_mo makes headed mode watchable — actions happen at human speed
         self._browser = await self._pw.chromium.launch(
             headless=self.config.headless,
             args=launch_args,
             proxy=proxy,
+            slow_mo=self.config.slow_mo if not self.config.headless else 0,
         )
 
-        self._context = await self._browser.new_context(
-            viewport=self.config.viewport,
-            ignore_https_errors=True,
-            user_agent=self.config.user_agent or None,
-        )
+        # Build context options
+        ctx_options: dict[str, Any] = {
+            "viewport": self.config.viewport,
+            "ignore_https_errors": True,
+        }
+        if self.config.user_agent:
+            ctx_options["user_agent"] = self.config.user_agent
+
+        self._context = await self._browser.new_context(**ctx_options)
         self._context.set_default_timeout(self.config.page_timeout)
+        self._context.set_default_navigation_timeout(self.config.page_timeout)
 
         self._page = await self._context.new_page()
 
@@ -259,13 +301,28 @@ class AutoNavigator:
             self._page.on("request", self._on_request)
             self._page.on("response", self._on_response)
 
+        logger.info(
+            "Browser launched (%s mode, slow_mo=%dms)",
+            "headless" if self.config.headless else "headed",
+            self.config.slow_mo if not self.config.headless else 0,
+        )
+
     async def _close_browser(self) -> None:
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
+        try:
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw:
+                await self._pw.stop()
+        except Exception:
+            pass
 
     # ── Core navigation loop ──────────────────────────────────────────────
 
@@ -277,17 +334,19 @@ class AutoNavigator:
 
         logger.info("[depth=%d] Navigating → %s", depth, url)
 
-        try:
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=self.config.page_timeout)
-        except Exception as exc:
-            logger.debug("Navigation failed for %s: %s", url, exc)
-            return
+        # Navigate with retry
+        response = await self._safe_goto(page, url)
+        if response is None:
+            # Even if goto "failed", the page might have partially loaded
+            # Give it a moment and try to work with whatever loaded
+            await asyncio.sleep(2.0)
 
-        # Wait for dynamic content to settle
-        await self._wait_for_idle(page)
+        # Wait for the page to fully render
+        await self._wait_for_page_ready(page)
 
         status = response.status if response else 0
         current_url = page.url
+        self._current_url = current_url
 
         # Record as endpoint
         self._add_endpoint(current_url, "GET", "auto_navigator", status=status)
@@ -297,18 +356,22 @@ class AutoNavigator:
             await self._take_screenshot(page, current_url)
 
         # ── Extract links from the page ───────────────────────────────────
+        self._status_message = "Extracting links..."
         await self._extract_links(page, depth)
 
         # ── Extract and submit forms ──────────────────────────────────────
         if self.config.form_submit:
+            self._status_message = "Processing forms..."
             await self._process_forms(page, current_url, depth)
 
         # ── Click interactive elements (buttons, tabs, accordions) ────────
         if self.config.click_buttons:
+            self._status_message = "Clicking interactive elements..."
             await self._click_interactive_elements(page, depth)
 
         # ── Click navigation elements (nav links, dropdowns) ─────────────
         if self.config.click_navigation:
+            self._status_message = "Exploring navigation..."
             await self._click_navigation_elements(page, depth)
 
         # ── Extract JS files ──────────────────────────────────────────────
@@ -317,15 +380,56 @@ class AutoNavigator:
         # ── Detect SPA routes via inline JS ───────────────────────────────
         await self._detect_spa_routes(page, current_url, depth)
 
-    async def _wait_for_idle(self, page: Page, timeout: int = 5000) -> None:
-        """Wait for the page to become relatively idle (network + DOM)."""
+    async def _safe_goto(self, page: Page, url: str, retries: int = 2) -> Any:
+        """Navigate to a URL with retries and multiple wait strategies."""
+        last_error = None
+        for attempt in range(retries + 1):
+            try:
+                # First try: wait for load event (more reliable than domcontentloaded)
+                response = await page.goto(
+                    url,
+                    wait_until="load",
+                    timeout=self.config.page_timeout,
+                )
+                return response
+            except Exception as exc:
+                last_error = exc
+                if attempt < retries:
+                    logger.debug(
+                        "Navigation attempt %d failed for %s: %s — retrying...",
+                        attempt + 1, url, exc,
+                    )
+                    await asyncio.sleep(1.5)
+                    # Retry with a more lenient wait strategy
+                    try:
+                        response = await page.goto(
+                            url,
+                            wait_until="commit",
+                            timeout=self.config.page_timeout,
+                        )
+                        return response
+                    except Exception:
+                        continue
+
+        logger.warning("All navigation attempts failed for %s: %s", url, last_error)
+        return None
+
+    async def _wait_for_page_ready(self, page: Page) -> None:
+        """Wait for the page to be fully ready — both network and rendering."""
+        # 1. Wait for network to settle
         try:
-            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
             pass
-        # Small extra delay for JS rendering
-        delay = random.uniform(*self.config.action_delay)
-        await asyncio.sleep(delay)
+
+        # 2. Wait for DOM to be stable
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+        except Exception:
+            pass
+
+        # 3. Fixed delay to let JS frameworks render their content
+        await asyncio.sleep(self.config.wait_after_load)
 
     # ── Link extraction ───────────────────────────────────────────────────
 
@@ -389,34 +493,39 @@ class AutoNavigator:
 
                 if submit_btn:
                     try:
-                        async with page.expect_navigation(timeout=10_000, wait_until="domcontentloaded"):
+                        async with page.expect_navigation(timeout=10_000, wait_until="load"):
                             await submit_btn.click()
                     except Exception:
                         # Navigation may not happen (AJAX form)
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(1.5)
                 else:
                     # No submit button — try pressing Enter on the last input
                     if inputs:
                         try:
-                            async with page.expect_navigation(timeout=10_000, wait_until="domcontentloaded"):
+                            async with page.expect_navigation(timeout=10_000, wait_until="load"):
                                 await inputs[-1].press("Enter")
                         except Exception:
-                            await asyncio.sleep(1.0)
+                            await asyncio.sleep(1.5)
 
                 self._add_endpoint(action_url, method, "auto_navigator_form")
 
-                # Capture the resulting page
-                await self._wait_for_idle(page)
+                # Wait for the resulting page to render
+                await self._wait_for_page_ready(page)
                 new_url = page.url
                 if new_url not in self._visited_urls:
                     self._enqueue(new_url, depth + 1)
 
                 # Go back to continue exploring other forms
                 try:
-                    await page.go_back(wait_until="domcontentloaded", timeout=8_000)
-                    await self._wait_for_idle(page)
+                    await page.go_back(wait_until="load", timeout=10_000)
+                    await self._wait_for_page_ready(page)
                 except Exception:
-                    pass
+                    # If go_back fails, navigate back to the original page
+                    try:
+                        await page.goto(page_url, wait_until="load", timeout=self.config.page_timeout)
+                        await self._wait_for_page_ready(page)
+                    except Exception:
+                        pass
 
             except Exception as exc:
                 logger.debug("Form processing error: %s", exc)
@@ -508,7 +617,7 @@ class AutoNavigator:
                         await el.click(timeout=3_000)
 
                         # Brief pause to let content render
-                        await asyncio.sleep(random.uniform(0.2, 0.6))
+                        await asyncio.sleep(random.uniform(0.3, 0.8))
 
                         # Check if navigation happened (new URL)
                         new_url = page.url
@@ -595,18 +704,21 @@ class AutoNavigator:
 
     def _on_request(self, request: PWRequest) -> None:
         """Capture every outgoing request."""
-        url = request.url
-        method = request.method
-        resource_type = request.resource_type
+        try:
+            url = request.url
+            method = request.method
+            resource_type = request.resource_type
 
-        # Record all XHR / fetch / websocket requests as discovered endpoints
-        if resource_type in ("xhr", "fetch", "websocket"):
-            self._add_endpoint(url, method, f"auto_navigator_{resource_type}")
+            # Record all XHR / fetch / websocket requests as discovered endpoints
+            if resource_type in ("xhr", "fetch", "websocket"):
+                self._add_endpoint(url, method, f"auto_navigator_{resource_type}")
 
-        # Also capture script and document loads
-        if resource_type in ("script",) and url.endswith(".js"):
-            if url not in self._captured_js_files:
-                self._captured_js_files.append(url)
+            # Also capture script and document loads
+            if resource_type in ("script",) and url.endswith(".js"):
+                if url not in self._captured_js_files:
+                    self._captured_js_files.append(url)
+        except Exception:
+            pass
 
     def _on_response(self, response: PWResponse) -> None:
         """Record network response metadata."""
@@ -627,7 +739,6 @@ class AutoNavigator:
     async def _take_screenshot(self, page: Page, url: str) -> None:
         """Take a screenshot of the current page."""
         try:
-            from pathlib import Path
             ss_dir = Path(self.config.screenshot_dir)
             ss_dir.mkdir(parents=True, exist_ok=True)
 
@@ -652,7 +763,7 @@ class AutoNavigator:
         table.add_column("Value", style="bold cyan")
 
         table.add_row("⏱  Elapsed",           f"{elapsed:.0f}s")
-        table.add_row("📄 Pages visited",      str(self._page_count))
+        table.add_row("📄 Pages visited",      f"{self._page_count} / {self.config.max_pages}")
         table.add_row("📋 Queue remaining",    str(len(self._queued_urls)))
         table.add_row("🔗 Endpoints found",    str(len(self._captured_endpoints)))
         table.add_row("🌐 Network requests",   str(len(self._network_requests)))
@@ -661,12 +772,19 @@ class AutoNavigator:
         table.add_row("📸 Screenshots",        str(self._screenshots_taken))
         table.add_row("⚡ Rate",               f"{rate:.1f} pages/s")
 
-        current_url = ""
-        if self._visited_urls:
-            current_url = list(self._visited_urls)[-1]
-        if len(current_url) > 80:
-            current_url = current_url[:77] + "..."
-        table.add_row("🎯 Current",            current_url)
+        # Current URL (truncated)
+        display_url = self._current_url
+        if len(display_url) > 72:
+            display_url = display_url[:69] + "..."
+        table.add_row("🎯 Current",            display_url or "(starting)")
+        table.add_row("📊 Status",             self._status_message)
+
+        # Show last error if any
+        if self._errors:
+            last_err = self._errors[-1]
+            if len(last_err) > 72:
+                last_err = last_err[:69] + "..."
+            table.add_row("⚠️  Last error",      f"[red]{last_err}[/red]")
 
         return Panel(
             table,
