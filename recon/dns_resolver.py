@@ -25,7 +25,7 @@ ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 class DNSResolver:
     """Resolve subdomains to IPs and collect DNS records."""
 
-    def __init__(self, timeout: int = 120) -> None:
+    def __init__(self, timeout: int = 1800) -> None:
         self.timeout = timeout
         self._has_dnsx = shutil.which("dnsx") is not None
 

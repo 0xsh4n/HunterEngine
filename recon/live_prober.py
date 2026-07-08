@@ -33,7 +33,7 @@ class LiveProber:
         self,
         rate_limiter: Optional[RateLimiter] = None,
         waf_bypass: Optional[WAFBypass] = None,
-        timeout: int = 300,
+        timeout: int = 1800,  # Increased default timeout to 30 minutes
     ) -> None:
         self.rate_limiter = rate_limiter
         self.waf_bypass = waf_bypass
