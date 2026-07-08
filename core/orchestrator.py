@@ -274,7 +274,16 @@ class Orchestrator:
         logger.info(f"Found {len(self.state.subdomains)} unique subdomains")
 
         # Filter to in-scope
+        old_subdomains = self.state.subdomains[:]
+        original_count = len(old_subdomains)
+        if original_count > 0:
+            logger.debug(f"Sample before filtering: {old_subdomains[:3]}")
+            
         self.state.subdomains = self.scope_loader.filter_in_scope(self.state.subdomains)
+        
+        if original_count > 0 and len(self.state.subdomains) == 0:
+            logger.warning("All subdomains were filtered out by ScopeLoader! Check if scope.yaml has a wildcard (e.g., *.domain.com).")
+            logger.warning(f"First rejected item was exactly: {repr(old_subdomains[0] if old_subdomains else 'none')}")
 
         # DNS resolution
         resolver = DNSResolver()
