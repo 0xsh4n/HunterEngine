@@ -10,10 +10,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import re
 from typing import Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger("hunterengine.recon.historical")
+
+# Regex to strip ANSI escape codes
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 # Extensions to filter out (binary/static files)
@@ -100,8 +104,14 @@ class HistoricalURLCollector:
             timeout=self.timeout
         )
         lines = stdout.decode().strip().splitlines()
-        logger.info(f"waybackurls found {len(lines)} URLs")
-        return [line.strip() for line in lines if line.strip()]
+        clean_lines = []
+        for line in lines:
+            clean_line = ANSI_ESCAPE.sub('', line).strip()
+            if clean_line:
+                clean_lines.append(clean_line)
+                
+        logger.info(f"waybackurls found {len(clean_lines)} URLs")
+        return clean_lines
 
     async def _run_tool(self, cmd: list[str], name: str) -> list[str]:
         """Execute a tool and return stdout lines."""
@@ -113,8 +123,14 @@ class HistoricalURLCollector:
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
             lines = stdout.decode().strip().splitlines()
-            logger.info(f"{name} found {len(lines)} URLs")
-            return [line.strip() for line in lines if line.strip()]
+            clean_lines = []
+            for line in lines:
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if clean_line:
+                    clean_lines.append(clean_line)
+                    
+            logger.info(f"{name} found {len(clean_lines)} URLs")
+            return clean_lines
         except asyncio.TimeoutError:
             logger.warning(f"{name} timed out")
             return []

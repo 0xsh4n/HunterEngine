@@ -12,6 +12,7 @@ import json
 import logging
 import shutil
 import tempfile
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,9 @@ from core.tool_resolver import find_projectdiscovery_httpx
 from core.waf_bypass import WAFBypass
 
 logger = logging.getLogger("hunterengine.recon.prober")
+
+# Regex to strip ANSI escape codes
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 class LiveProber:
@@ -83,10 +87,11 @@ class LiveProber:
 
             results = []
             for line in stdout.decode().strip().splitlines():
-                if not line.strip():
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if not clean_line:
                     continue
                 try:
-                    data = json.loads(line)
+                    data = json.loads(clean_line)
                     results.append({
                         "url": data.get("url", ""),
                         "status": data.get("status_code", 0),
@@ -180,8 +185,11 @@ class LiveProber:
 
             port_map: dict[str, list[int]] = {}
             for line in stdout.decode().strip().splitlines():
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if not clean_line:
+                    continue
                 try:
-                    data = json.loads(line)
+                    data = json.loads(clean_line)
                     host = data.get("host", "")
                     port = data.get("port", 0)
                     port_map.setdefault(host, []).append(port)

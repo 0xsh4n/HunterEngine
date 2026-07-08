@@ -12,10 +12,14 @@ import logging
 import shutil
 import socket
 import tempfile
+import re
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("hunterengine.recon.dns")
+
+# Regex to strip ANSI escape codes
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 class DNSResolver:
@@ -67,10 +71,11 @@ class DNSResolver:
             results = []
             import json
             for line in stdout.decode().strip().splitlines():
-                if not line.strip():
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if not clean_line:
                     continue
                 try:
-                    data = json.loads(line)
+                    data = json.loads(clean_line)
                     results.append({
                         "hostname": data.get("host", ""),
                         "ips": data.get("a", []),

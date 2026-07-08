@@ -10,9 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import re
 from typing import Optional
 
 logger = logging.getLogger("hunterengine.recon.subdomain")
+
+# Regex to strip ANSI escape codes
+ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 class SubdomainEnumerator:
@@ -109,8 +113,14 @@ class SubdomainEnumerator:
                 logger.warning(f"{name} exited with code {proc.returncode}: {stderr.decode()[:200]}")
 
             lines = stdout.decode().strip().splitlines()
-            logger.info(f"{name} found {len(lines)} subdomains")
-            return [line.strip() for line in lines if line.strip()]
+            clean_lines = []
+            for line in lines:
+                clean_line = ANSI_ESCAPE.sub('', line).strip()
+                if clean_line:
+                    clean_lines.append(clean_line)
+                    
+            logger.info(f"{name} found {len(clean_lines)} subdomains")
+            return clean_lines
 
         except asyncio.TimeoutError:
             logger.warning(f"{name} timed out after {self.timeout}s")
