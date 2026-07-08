@@ -85,6 +85,7 @@ class Orchestrator:
         settings_path: str = "config/settings.yaml",
         auto_crawl: bool = False,
         headed: bool = False,
+        skip_enum: bool = False,
     ) -> None:
         self.scope_path = scope_path
         self.settings_path = settings_path
@@ -92,6 +93,7 @@ class Orchestrator:
         self.state = ScanState()
         self.auto_crawl = auto_crawl
         self.headed = headed
+        self.skip_enum = skip_enum
 
         # Subsystems (initialized in setup())
         self.scope_loader: Optional[ScopeLoader] = None
@@ -266,12 +268,16 @@ class Orchestrator:
         logger.info(f"Recon targets: {domains}")
 
         # Subdomain enumeration
-        enumerator = SubdomainEnumerator()
-        for domain in domains:
-            subs = await enumerator.enumerate(domain)
-            self.state.subdomains.extend(subs)
-        self.state.subdomains = list(set(self.state.subdomains))
-        logger.info(f"Found {len(self.state.subdomains)} unique subdomains")
+        if self.skip_enum:
+            logger.info("Skipping subdomain enumeration (using provided domains only)")
+            self.state.subdomains = domains[:]
+        else:
+            enumerator = SubdomainEnumerator()
+            for domain in domains:
+                subs = await enumerator.enumerate(domain)
+                self.state.subdomains.extend(subs)
+            self.state.subdomains = list(set(self.state.subdomains))
+            logger.info(f"Found {len(self.state.subdomains)} unique subdomains")
 
         # Filter to in-scope
         old_subdomains = self.state.subdomains[:]

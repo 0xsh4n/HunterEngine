@@ -83,6 +83,7 @@ def scan(
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate config without scanning"),
     auto_crawl: bool = typer.Option(False, "--auto-crawl", help="Enable integrated browser auto-crawl (ZAP-style)"),
     headed: bool = typer.Option(False, "--headed", help="Show the browser window during auto-crawl"),
+    no_enum: bool = typer.Option(False, "--no-enum", help="Skip subdomain enumeration and only scan explicitly provided domains"),
 ) -> None:
     """Run the full scan pipeline or a specific phase."""
     setup_logging(verbose)
@@ -95,6 +96,7 @@ def scan(
         settings_path=settings,
         auto_crawl=auto_crawl,
         headed=headed,
+        skip_enum=no_enum,
     )
 
     async def run_scan():

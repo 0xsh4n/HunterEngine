@@ -3,7 +3,7 @@
 # This file enforces scope boundaries for all modules.
 
 program:
-  name: "google"
+  name: "infomaniak"
   platform: "yeswehack"           # hackerone | bugcrowd | private
   url: ""                         # Program URL for reference
 
