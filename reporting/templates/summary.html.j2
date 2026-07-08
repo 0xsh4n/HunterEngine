@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HunterEngine — Scan Report</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #0d1117; color: #c9d1d9; line-height: 1.6; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+        h1 { color: #58a6ff; margin-bottom: 8px; }
+        h2 { color: #58a6ff; margin: 32px 0 16px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+        .meta { color: #8b949e; font-size: 14px; margin-bottom: 24px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin: 24px 0; }
+        .stat-card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 20px; text-align: center; }
+        .stat-card .value { font-size: 32px; font-weight: bold; color: #58a6ff; }
+        .stat-card .label { font-size: 13px; color: #8b949e; margin-top: 4px; }
+        .severity-bar { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+        .sev-badge { padding: 6px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+        .sev-critical { background: #da3633; color: #fff; }
+        .sev-high { background: #d29922; color: #fff; }
+        .sev-medium { background: #e3b341; color: #000; }
+        .sev-low { background: #388bfd; color: #fff; }
+        .sev-info { background: #484f58; color: #c9d1d9; }
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+        th { background: #161b22; color: #8b949e; text-align: left; padding: 12px; font-size: 13px;
+             border-bottom: 2px solid #21262d; }
+        td { padding: 12px; border-bottom: 1px solid #21262d; font-size: 14px; }
+        tr:hover { background: #161b22; }
+        .finding-card { background: #161b22; border: 1px solid #21262d; border-radius: 8px;
+                        padding: 20px; margin: 16px 0; }
+        .finding-card h3 { color: #c9d1d9; margin-bottom: 8px; }
+        .finding-card .desc { color: #8b949e; margin: 8px 0; }
+        .evidence { background: #0d1117; border: 1px solid #21262d; border-radius: 4px;
+                    padding: 12px; font-family: 'Fira Code', monospace; font-size: 13px;
+                    overflow-x: auto; white-space: pre-wrap; margin: 12px 0; max-height: 300px; overflow-y: auto; }
+        .tag { display: inline-block; background: #21262d; color: #8b949e; padding: 2px 8px;
+               border-radius: 4px; font-size: 12px; margin: 2px; }
+        .priority { font-weight: bold; }
+        .priority-P1 { color: #da3633; } .priority-P2 { color: #d29922; }
+        .priority-P3 { color: #e3b341; } .priority-P4 { color: #388bfd; }
+        .priority-P5 { color: #484f58; }
+        footer { text-align: center; color: #484f58; font-size: 12px; margin-top: 48px; padding: 24px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 HunterEngine Scan Report</h1>
+        <div class="meta">Generated: {{ timestamp }} | Duration: {{ "%.0f"|format(duration) }}s</div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="value">{{ scan_state.subdomains | length }}</div>
+                <div class="label">Subdomains</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ scan_state.live_hosts | length }}</div>
+                <div class="label">Live Hosts</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ scan_state.endpoints | length }}</div>
+                <div class="label">Endpoints</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ findings | length }}</div>
+                <div class="label">Findings</div>
+            </div>
+        </div>
+
+        <h2>Findings</h2>
+
+        {% for finding in findings %}
+        <div class="finding-card">
+            <h3>
+                <span class="priority priority-{{ finding.priority | default('P5') }}">
+                    [{{ finding.priority | default('P5') }}]
+                </span>
+                {{ finding.title }}
+            </h3>
+            <div class="severity-bar">
+                <span class="sev-badge sev-{{ finding.severity }}">{{ finding.severity | upper }}</span>
+                <span style="color: #8b949e;">Confidence: {{ "%.0f"|format(finding.confidence * 100) }}%</span>
+                <span style="color: #484f58;">{{ finding.detector }}</span>
+            </div>
+            <div class="desc">{{ finding.description }}</div>
+            <div style="margin: 8px 0; font-size: 13px; color: #58a6ff;">{{ finding.url }}</div>
+            {% if finding.evidence %}
+            <div class="evidence">{{ finding.evidence[:1500] }}</div>
+            {% endif %}
+            <div>
+                {% for tag in finding.tags | default([]) %}
+                <span class="tag">{{ tag }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+
+        {% if scan_state.errors %}
+        <h2>Errors</h2>
+        <ul>
+        {% for err in scan_state.errors %}
+            <li style="color: #da3633;">{{ err }}</li>
+        {% endfor %}
+        </ul>
+        {% endif %}
+
+        <footer>
+            HunterEngine — Automated Bug Bounty Reconnaissance & Detection
+        </footer>
+    </div>
+</body>
+</html>

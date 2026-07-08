@@ -1,0 +1,42 @@
+# hunterengine requirements
+# Core
+typer[all]>=0.9.0
+pyyaml>=6.0
+python-dotenv>=1.0
+rich>=13.0
+aiosqlite>=0.19
+aiofiles>=23.0
+
+# HTTP & Networking
+httpx[http2]>=0.25
+requests-toolbelt>=1.0
+
+# Browser automation
+playwright>=1.40
+
+# Proxy
+mitmproxy>=10.0
+
+# JWT / Crypto analysis
+python-jose[cryptography]>=3.3
+pyjwt>=2.8
+cryptography>=41.0
+
+# JS analysis
+jsbeautifier>=1.14
+
+# WAF bypass
+fake-useragent>=1.4
+# curl-impersonate-py handled separately
+
+# Reporting
+Jinja2>=3.1
+
+# Async utilities
+anyio>=4.0
+
+# Data processing
+tldextract>=5.0
+validators>=0.22
+beautifulsoup4>=4.12
+lxml>=4.9

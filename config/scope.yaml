@@ -1,0 +1,37 @@
+# hunterengine scope definition
+# CRITICAL: Only test targets you are AUTHORIZED to test.
+# This file enforces scope boundaries for all modules.
+
+program:
+  name: "google"
+  platform: "yeswehack"           # hackerone | bugcrowd | private
+  url: ""                         # Program URL for reference
+
+in_scope:
+  domains:
+    - "*.infomaniak.com"
+  cidrs: []                       # e.g. "10.0.0.0/8"
+  urls: []                        # Specific URL paths to include
+
+out_of_scope:
+  domains:
+    - "admin.example.com"
+    - "vpn.example.com"
+  cidrs: []
+  urls:
+    - "*/logout"
+    - "*/delete-account"
+  keywords:                       # Never fuzz these params
+    - "password_reset"
+    - "delete"
+    - "destroy"
+
+auth:
+  type: "none"                    # none | bearer | cookie | basic | custom
+  token: ""
+  cookie: ""
+  headers: {}                     # Custom auth headers
+  login_url: ""
+  credentials:
+    username: ""
+    password: ""

@@ -1,0 +1,111 @@
+# hunterengine global settings
+
+general:
+  concurrency: 20                 # Max concurrent async tasks
+  timeout: 30                     # Default HTTP timeout (seconds)
+  retries: 2                      # Retry failed requests
+  user_agent: "random"            # random | static | <custom string>
+  data_dir: "data"
+  verbose: false
+  color_output: true
+
+rate_limiting:
+  requests_per_second: 10         # Global RPS cap
+  per_host_rps: 5                 # Per-host RPS cap
+  burst_size: 20                  # Burst allowance
+  adaptive: true                  # Auto-slow on WAF/429
+  backoff_factor: 2.0             # Exponential backoff multiplier
+  backoff_max: 120                # Max backoff seconds
+
+proxy:
+  enabled: true
+  listen_host: "127.0.0.1"
+  listen_port: 8080
+  auto_port: true                 # If 8080 is busy, use the next free local port
+  upstream_proxy: ""              # e.g. socks5://127.0.0.1:9050
+  log_requests: true
+  intercept_mode: false           # Manual intercept mode
+
+browser:
+  headless: true
+  chromium_args:
+    - "--disable-gpu"
+    - "--no-sandbox"
+    - "--disable-dev-shm-usage"
+  page_timeout: 30000             # ms
+  screenshot_on_finding: true
+  screenshot_dir: "data/screenshots"
+
+waf_bypass:
+  ip_rotation:
+    enabled: false
+    provider: "aws"               # aws | proxy_pool
+    regions: ["us-east-1", "us-west-2", "eu-west-1"]
+  tls_impersonation:
+    enabled: false
+    browser: "chrome"             # chrome | firefox
+  ua_rotation: true
+  referrer_spoof: true
+  delay_range: [0.5, 2.0]        # Random delay between requests (seconds)
+
+recon:
+  subdomain_threads: 10
+  dns_wordlist: "config/wordlists/subdomains.txt"
+  resolve_all: true
+  port_scan_top: 1000             # Top N ports to scan
+
+crawl:
+  max_depth: 5
+  max_pages: 500
+  respect_robots: false           # For authorized testing
+  js_rendering: true
+  form_fill: false                # Auto-fill discovered forms
+  param_wordlist: "config/wordlists/params.txt"
+
+detection:
+  modules:                        # Enable/disable individual detectors
+    xss: true
+    cors: true
+    secrets: true
+    jwt: true
+    prototype_pollution: true
+    ssrf: true
+    idor: true
+    graphql: true
+    auth: true
+    open_redirect: true
+    csp: true
+    subdomain_takeover: true
+    dependency: true
+    race_condition: true
+    crypto: false
+  confidence_threshold: 0.6       # Min confidence to report (0.0-1.0)
+  nuclei_templates: ""            # Path to custom nuclei templates
+  nuclei_severity: ["critical", "high", "medium"]
+
+ai:
+  enabled: true                   # Local AI triage pass; scanner still works if model is unavailable
+  provider: "ollama"              # ollama | openai-compatible | lmstudio | llama.cpp
+  max_findings: 50                # Cap cost/latency for local reasoning
+  min_confidence: 0.2             # Include weak signals only after detectors promote them to findings
+  concurrency: 2
+  max_context_chars: 6000
+  redact_sensitive: true
+  local_model:
+    base_url: "http://127.0.0.1:11434"
+    model: "hf.co/entrick/Security-SLM-Gemma-4-E2B-it-GGUF:Q4_K_M"
+    timeout: 45
+    temperature: 0.1
+    api_key_env: ""              # For OpenAI-compatible local servers if needed
+
+reporting:
+  format: ["markdown", "hackerone"]  # markdown | html | hackerone | bugcrowd
+  output_dir: "data/reports"
+  include_evidence: true
+  include_screenshots: true
+  auto_triage: true               # Auto-classify severity
+
+database:
+  backend: "sqlite"               # sqlite | postgresql
+  sqlite_path: "data/findings.db"
+  memory_db_path: "data/memory.db"

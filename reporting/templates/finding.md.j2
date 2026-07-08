@@ -1,0 +1,62 @@
+# {{ title }}
+
+**Severity:** {{ severity | upper }}
+**Confidence:** {{ "%.0f" | format(confidence * 100) }}%
+**Detector:** {{ detector }}
+**URL:** `{{ url }}`
+{% if parameter %}**Parameter:** `{{ parameter }}`{% endif %}
+
+---
+
+## Description
+
+{{ description }}
+
+{% if evidence %}
+## Evidence
+
+```
+{{ evidence }}
+```
+{% endif %}
+
+{% if request %}
+## HTTP Request
+
+```http
+{{ request }}
+```
+{% endif %}
+
+{% if response %}
+## HTTP Response
+
+```http
+{{ response }}
+```
+{% endif %}
+
+{% if impact %}
+## Impact
+
+{{ impact }}
+{% endif %}
+
+{% if remediation %}
+## Remediation
+
+{{ remediation }}
+{% endif %}
+
+{% if references %}
+## References
+
+{% for ref in references %}
+- {{ ref }}
+{% endfor %}
+{% endif %}
+
+---
+
+*Detected by HunterEngine at {{ timestamp }}*
+*Tags: {{ tags | join(", ") }}*

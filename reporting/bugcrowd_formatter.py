@@ -1,0 +1,166 @@
+"""
+Bugcrowd submission formatter.
+
+Formats findings into Bugcrowd-ready report drafts with
+VRT mapping and proper taxonomy.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("hunterengine.reporting.bugcrowd")
+
+# Bugcrowd Vulnerability Rating Taxonomy (VRT) mapping
+VRT_MAP = {
+    "xss": "Cross-Site Scripting (XSS) > Reflected",
+    "cors": "Server Security Misconfiguration > CORS",
+    "ssrf": "Server-Side Request Forgery (SSRF)",
+    "idor": "Broken Access Control (BAC) > IDOR",
+    "jwt": "Broken Authentication and Session Management > JWT",
+    "open-redirect": "Unvalidated Redirects and Forwards > Open Redirect",
+    "prototype-pollution": "Server Security Misconfiguration > Prototype Pollution",
+    "subdomain-takeover": "Server Security Misconfiguration > Subdomain Takeover",
+    "secret": "Sensitive Data Exposure > Visible Secrets",
+    "info-disclosure": "Sensitive Data Exposure > Visible Information",
+    "csp": "Server Security Misconfiguration > CSP Bypass",
+    "race-condition": "Application-Level Denial-of-Service > Race Condition",
+    "graphql": "Server Security Misconfiguration > GraphQL",
+    "auth": "Broken Authentication and Session Management",
+    "clickjacking": "Client-Side Injection > Clickjacking",
+    "dependency": "Using Components with Known Vulnerabilities",
+    "crypto": "Cryptographic Issues",
+}
+
+BC_SEVERITY_MAP = {
+    "critical": "P1 — Critical",
+    "high": "P2 — Severe",
+    "medium": "P3 — Moderate",
+    "low": "P4 — Low",
+    "info": "P5 — Informational",
+}
+
+
+class BugcrowdFormatter:
+    """Format findings for Bugcrowd bug bounty submissions."""
+
+    def __init__(self, output_dir: str | Path = "data/reports") -> None:
+        self.output_dir = Path(output_dir) / "bugcrowd"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    async def format_all(self, findings: list[dict]) -> list[Path]:
+        """Format all findings into individual Bugcrowd submission files."""
+        paths = []
+        submittable = [
+            f for f in findings
+            if f.get("severity") != "info" and f.get("confidence", 0) >= 0.6
+        ]
+
+        for i, finding in enumerate(submittable, 1):
+            path = self.format_single(finding, i)
+            paths.append(path)
+
+        logger.info(f"Formatted {len(paths)} Bugcrowd submissions")
+        return paths
+
+    def format_single(self, finding: dict, index: int = 1) -> Path:
+        """Format a single finding into a Bugcrowd submission draft."""
+        severity = finding.get("severity", "info")
+        bc_severity = BC_SEVERITY_MAP.get(severity, "P5 — Informational")
+        vrt = self._map_vrt(finding)
+        title = finding.get("title", "Untitled Finding")
+        url = finding.get("url", "")
+
+        lines = [
+            f"# {title}",
+            "",
+            f"**Priority:** {bc_severity}",
+            f"**VRT:** {vrt}",
+            f"**URL:** {url}",
+            "",
+            "---",
+            "",
+            "## Description",
+            "",
+            finding.get("description", "No description provided."),
+            "",
+            "## Proof of Concept",
+            "",
+        ]
+
+        # PoC steps
+        param = finding.get("parameter", "")
+        if finding.get("reproduction"):
+            lines.append(finding["reproduction"])
+        else:
+            lines.append(f"**Target URL:** `{url}`")
+            if param:
+                lines.append(f"**Vulnerable Parameter:** `{param}`")
+            lines.append("")
+            lines.append("### Steps:")
+            lines.append(f"1. Open the target URL in a browser")
+            if param:
+                lines.append(f"2. Modify the `{param}` parameter as shown in the evidence")
+            lines.append(f"{'3' if param else '2'}. Observe the vulnerable behavior in the response")
+
+        lines.append("")
+
+        # Evidence
+        if finding.get("evidence"):
+            lines.extend([
+                "## Evidence",
+                "",
+                "```",
+                finding["evidence"][:3000],
+                "```",
+                "",
+            ])
+
+        # Impact
+        lines.extend([
+            "## Impact",
+            "",
+            finding.get("impact", f"This {severity}-severity vulnerability affects the security of the application."),
+            "",
+        ])
+
+        # Remediation
+        if finding.get("remediation"):
+            lines.extend([
+                "## Remediation",
+                "",
+                finding["remediation"],
+                "",
+            ])
+
+        # References
+        if finding.get("references"):
+            lines.append("## References")
+            lines.append("")
+            for ref in finding["references"]:
+                lines.append(f"- {ref}")
+            lines.append("")
+
+        lines.extend([
+            "---",
+            f"*Generated by HunterEngine — {time.strftime('%Y-%m-%d %H:%M:%S')}*",
+        ])
+
+        safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)[:60]
+        filename = f"{index:03d}_{safe_title.replace(' ', '_')}.md"
+        output_path = self.output_dir / filename
+        output_path.write_text("\n".join(lines))
+
+        return output_path
+
+    @staticmethod
+    def _map_vrt(finding: dict) -> str:
+        """Map finding tags to Bugcrowd VRT categories."""
+        tags = set(finding.get("tags", []))
+        for tag, vrt in VRT_MAP.items():
+            if tag in tags:
+                return vrt
+        return "Other > General Vulnerability"
