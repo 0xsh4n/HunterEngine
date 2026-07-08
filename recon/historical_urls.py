@@ -89,17 +89,16 @@ class HistoricalURLCollector:
     async def _run_waybackurls(self, domain: str) -> list[str]:
         """Run waybackurls."""
         logger.info(f"Running waybackurls on {domain}")
-        proc = await asyncio.create_subprocess_exec(
-            "echo", domain,
-            stdout=asyncio.subprocess.PIPE,
-        )
         cmd_proc = await asyncio.create_subprocess_exec(
             "waybackurls",
-            stdin=proc.stdout,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(cmd_proc.communicate(), timeout=self.timeout)
+        stdout, _ = await asyncio.wait_for(
+            cmd_proc.communicate(input=f"{domain}\n".encode()), 
+            timeout=self.timeout
+        )
         lines = stdout.decode().strip().splitlines()
         logger.info(f"waybackurls found {len(lines)} URLs")
         return [line.strip() for line in lines if line.strip()]

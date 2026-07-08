@@ -76,7 +76,10 @@ class LiveProber:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+
+            if proc.returncode != 0:
+                logger.error(f"httpx failed with code {proc.returncode}: {stderr.decode().strip()[:200]}")
 
             results = []
             for line in stdout.decode().strip().splitlines():
