@@ -2,7 +2,7 @@
 Pipeline orchestrator.
 
 Coordinates the full scan lifecycle:
-  Scope → Recon → Crawl → Detect → Correlate → Report
+  Scope → Recon → Crawl → AI Test → Detect → Correlate → AI Triage → Report
 
 Manages concurrency, module loading, and data flow between stages.
 """
@@ -33,6 +33,7 @@ class ScanPhase(str, Enum):
     INIT = "init"
     RECON = "recon"
     CRAWL = "crawl"
+    AI_TEST = "ai_test"
     DETECT = "detect"
     CORRELATE = "correlate"
     AI = "ai"
@@ -56,7 +57,7 @@ class ScanState:
     endpoints: list[dict] = field(default_factory=list)
     js_files: list[str] = field(default_factory=list)
     params: dict[str, list[str]] = field(default_factory=dict)
-    graphql_schemas: list[dict] = field(default_factory=dict)
+    graphql_schemas: list[dict] = field(default_factory=list)
 
     # Detection outputs
     findings: list[dict] = field(default_factory=list)
@@ -65,6 +66,8 @@ class ScanState:
     # Correlation outputs
     chained_findings: list[dict] = field(default_factory=list)
     ai_enriched_findings: int = 0
+    ai_test_probes: int = 0
+    ai_test_findings: int = 0
 
     # Stats
     total_requests: int = 0
@@ -185,16 +188,21 @@ class Orchestrator:
                 intercept_mode=proxy_conf.get("intercept_mode", False),
             ))
 
-        # Browser
+        # Browser — use the effective proxy port (may have been remapped)
         browser_conf = self.settings.get("browser", {})
+        effective_proxy_enabled = bool(proxy_conf.get("enabled", True) and self.proxy)
         self.browser = BrowserEngine(BrowserConfig(
             headless=browser_conf.get("headless", True),
             proxy_url=f"http://{proxy_host}:{proxy_port}",
-            use_proxy=proxy_conf.get("enabled", True),
+            use_proxy=effective_proxy_enabled,
             page_timeout=browser_conf.get("page_timeout", 30000),
             screenshot_dir=browser_conf.get("screenshot_dir", "data/screenshots"),
             chromium_args=browser_conf.get("chromium_args", []),
         ))
+        # Stash effective proxy for crawl/auto-navigator (avoids listen_port desync)
+        self._proxy_host = proxy_host
+        self._proxy_port = proxy_port
+        self._proxy_enabled = effective_proxy_enabled
 
         self.state.phase = ScanPhase.INIT
 
@@ -211,6 +219,7 @@ class Orchestrator:
         all_phases = [
             (ScanPhase.RECON, self._run_recon),
             (ScanPhase.CRAWL, self._run_crawl),
+            (ScanPhase.AI_TEST, self._run_ai_test),
             (ScanPhase.DETECT, self._run_detect),
             (ScanPhase.CORRELATE, self._run_correlate),
             (ScanPhase.AI, self._run_ai),
@@ -323,32 +332,60 @@ class Orchestrator:
         from crawl.js_crawler import JSCrawler
         from crawl.js_analyzer import JSAnalyzer
         from crawl.param_miner import ParamMiner
+        from crawl.graphql_mapper import GraphQLMapper
 
         crawl_conf = self.settings.get("crawl", {})
-        urls_to_crawl = [h.get("url", "") for h in self.state.live_hosts]
+        live_urls = [h.get("url", "") for h in self.state.live_hosts if h.get("url")]
+        # Seed with historical URLs (in-scope) so crawl covers Wayback/gau surface
+        historical_seeds = [
+            u for u in (self.state.historical_urls or [])[:150]
+            if u and (not self.scope_loader or self.scope_loader.is_in_scope(u))
+        ]
+        urls_to_crawl = list(dict.fromkeys(live_urls + historical_seeds))
+
+        # Merge tech_stack fingerprints into live_hosts for SPA detection
+        self._enrich_live_hosts_tech()
 
         # ── Auto-navigator (integrated browser crawl) ─────────────────────
         if self.auto_crawl:
             from crawl.auto_navigator import AutoNavigator, NavigatorConfig
+
+            proxy_url = ""
+            if getattr(self, "_proxy_enabled", False):
+                proxy_url = f"http://{self._proxy_host}:{self._proxy_port}"
 
             nav_config = NavigatorConfig(
                 headless=not self.headed,  # headed=True → visible browser
                 max_pages=crawl_conf.get("max_pages", 500),
                 max_depth=crawl_conf.get("max_depth", 10),
                 page_timeout=self.settings.get("browser", {}).get("page_timeout", 30_000),
-                form_submit=crawl_conf.get("form_fill", True),
+                form_submit=crawl_conf.get("form_fill", False),
                 screenshot_dir=self.settings.get("browser", {}).get("screenshot_dir", "data/screenshots"),
-                proxy_url=(
-                    f"http://{self.settings.get('proxy', {}).get('listen_host', '127.0.0.1')}:"
-                    f"{self.settings.get('proxy', {}).get('listen_port', 8080)}"
-                    if self.settings.get("proxy", {}).get("enabled", False) and self.proxy
-                    else ""
-                ),
+                proxy_url=proxy_url,
+                chromium_args=self.settings.get("browser", {}).get("chromium_args", [
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ]),
             )
             navigator = AutoNavigator(config=nav_config, scope_loader=self.scope_loader)
-            nav_results = await navigator.crawl(urls_to_crawl)
+            nav_results = await navigator.crawl(urls_to_crawl[:50] or live_urls)
             self.state.endpoints.extend(nav_results.get("endpoints", []))
             self.state.js_files.extend(nav_results.get("js_files", []))
+            # Promote in-scope network XHR/fetch into endpoints
+            for req in nav_results.get("network_requests", []) or []:
+                req_url = req.get("url", "")
+                if not req_url:
+                    continue
+                if self.scope_loader and not self.scope_loader.is_in_scope(req_url):
+                    continue
+                if req.get("resource_type") in ("xhr", "fetch", "websocket", "document"):
+                    self.state.endpoints.append({
+                        "url": req_url,
+                        "method": req.get("method", "GET"),
+                        "source": "auto_navigator_network",
+                        "status": req.get("status", 0),
+                    })
             logger.info(
                 "Auto-navigator: %d endpoints, %d JS files, %d network requests",
                 len(nav_results.get("endpoints", [])),
@@ -362,19 +399,40 @@ class Orchestrator:
             waf_bypass=self.waf_bypass,
             max_depth=crawl_conf.get("max_depth", 5),
         )
-        crawl_results = await crawler.crawl(urls_to_crawl)
+        crawl_results = await crawler.crawl(urls_to_crawl[:80] or live_urls)
         self.state.endpoints.extend(crawl_results.get("endpoints", []))
         self.state.js_files.extend(crawl_results.get("js_files", []))
 
-        # JS rendering for SPAs
+        # JS rendering for SPAs (uses tech on live_hosts + tech_stack)
         if crawl_conf.get("js_rendering", True) and self.browser:
-            js_crawler = JSCrawler(browser=self.browser, scope_loader=self.scope_loader)
+            js_crawler = JSCrawler(
+                browser=self.browser,
+                scope_loader=self.scope_loader,
+                tech_stack=self.state.tech_stack,
+            )
             spa_endpoints = await js_crawler.crawl_spa_targets(self.state.live_hosts)
             self.state.endpoints.extend(spa_endpoints)
 
+        # GraphQL discovery / introspection
+        try:
+            mapper = GraphQLMapper()
+            graphql_maps = await mapper.map_all(live_urls[:30])
+            self.state.graphql_schemas = graphql_maps
+            for gq in graphql_maps:
+                self.state.endpoints.append({
+                    "url": gq.get("url", ""),
+                    "method": "POST",
+                    "source": "graphql_mapper",
+                    "introspection": gq.get("introspection_enabled", False),
+                })
+            if graphql_maps:
+                logger.info("GraphQL mapper: %d endpoint(s)", len(graphql_maps))
+        except Exception as exc:
+            logger.warning("GraphQL mapping failed: %s", exc)
+
         # JS analysis
         analyzer = JSAnalyzer()
-        for js_url in self.state.js_files[:200]:  # Cap JS analysis
+        for js_url in list(dict.fromkeys(self.state.js_files))[:200]:
             findings = await analyzer.analyze(js_url)
             self.state.weak_signals.extend(findings.get("secrets", []))
             self.state.endpoints.extend(findings.get("endpoints", []))
@@ -385,15 +443,44 @@ class Orchestrator:
         params = await miner.discover(target_urls)
         self.state.params.update(params)
 
-        # Deduplicate endpoints
-        seen = set()
-        unique = []
+        # Deduplicate endpoints by method+url (keep distinct verbs)
+        seen: set[str] = set()
+        unique: list[dict] = []
         for ep in self.state.endpoints:
-            key = ep.get("url", "")
+            url = ep.get("url", "")
+            if not url:
+                continue
+            if self.scope_loader and not self.scope_loader.is_in_scope(url):
+                continue
+            key = f"{(ep.get('method') or 'GET').upper()}:{url}"
             if key not in seen:
                 seen.add(key)
                 unique.append(ep)
         self.state.endpoints = unique
+        self.state.js_files = list(dict.fromkeys(self.state.js_files))
+
+    async def _run_ai_test(self) -> None:
+        """AI testing phase: local Ollama bug-hunt subagents (not reporting)."""
+        from ai import TestingAIConfig, TestingAgent
+
+        config = TestingAIConfig.from_settings(self.settings)
+        if not config.enabled:
+            logger.info("AI testing mode disabled")
+            return
+
+        agent = TestingAgent(
+            config=config,
+            rate_limiter=self.rate_limiter,
+            waf_bypass=self.waf_bypass,
+            scope_loader=self.scope_loader,
+        )
+        findings = await agent.run(self.state)
+        threshold = self.settings.get("detection", {}).get("confidence_threshold", 0.6)
+        for finding in findings:
+            if finding.get("confidence", 0) >= threshold:
+                self.state.findings.append(finding)
+            else:
+                self.state.weak_signals.append(finding)
 
     async def _run_detect(self) -> None:
         """Detection phase: run enabled detection modules."""
@@ -460,16 +547,45 @@ class Orchestrator:
         self.state.findings.extend(chained)
 
     async def _run_ai(self) -> None:
-        """AI phase: local-model triage and report enrichment."""
+        """AI triage phase: reporting enrichment only (not bug hunting)."""
         from ai import LocalAIConfig, LocalAIReasoner
 
         config = LocalAIConfig.from_settings(self.settings)
         if not config.enabled:
-            logger.info("AI reasoner disabled")
+            logger.info("AI triage (reporting) disabled")
             return
 
         reasoner = LocalAIReasoner(config)
         await reasoner.enrich_findings(self.state.findings, self.state)
+
+    def _enrich_live_hosts_tech(self) -> None:
+        """Merge TechProfile fingerprints into live_hosts.tech for SPA gating."""
+        for host in self.state.live_hosts:
+            url = host.get("url", "")
+            profile = self.state.tech_stack.get(url)
+            existing = list(host.get("tech") or [])
+            if profile is None:
+                continue
+            names: list[str] = []
+            if hasattr(profile, "frameworks"):
+                names.extend(getattr(profile, "frameworks", []) or [])
+                names.extend(getattr(profile, "js_libraries", []) or [])
+                if getattr(profile, "is_spa", False):
+                    host["is_spa"] = True
+                if getattr(profile, "has_graphql", False):
+                    host["has_graphql"] = True
+            elif isinstance(profile, dict):
+                names.extend(profile.get("frameworks", []) or [])
+                names.extend(profile.get("tech", []) or [])
+                host["is_spa"] = bool(profile.get("is_spa", host.get("is_spa", False)))
+            merged = []
+            seen_lower: set[str] = set()
+            for name in existing + [str(n) for n in names]:
+                key = name.lower()
+                if key and key not in seen_lower:
+                    seen_lower.add(key)
+                    merged.append(name)
+            host["tech"] = merged
 
     async def _run_report(self) -> None:
         """Report phase: generate output reports."""
@@ -498,6 +614,8 @@ class Orchestrator:
             "weak_signals": len(self.state.weak_signals),
             "chained_findings": len(self.state.chained_findings),
             "ai_enriched_findings": self.state.ai_enriched_findings,
+            "ai_test_probes": self.state.ai_test_probes,
+            "ai_test_findings": self.state.ai_test_findings,
             "errors": len(self.state.errors),
             "rate_limiter": self.rate_limiter.get_stats() if self.rate_limiter else {},
         }

@@ -27,7 +27,7 @@ PRIORITY_ORDER = ["P5", "P4", "P3", "P2", "P1"]
 
 @dataclass
 class LocalAIConfig:
-    """Configuration for local AI analysis."""
+    """Configuration for local AI *reporting* triage (not testing)."""
 
     enabled: bool = False
     provider: str = "ollama"
@@ -47,10 +47,17 @@ class LocalAIConfig:
     def from_settings(cls, settings: dict[str, Any]) -> "LocalAIConfig":
         ai_conf = settings.get("ai", {}) or {}
         local_conf = ai_conf.get("local_model", {}) or {}
+        mode = str(ai_conf.get("mode", "triage")).lower().strip()
+        # Triage/reporting only when mode is triage or both
+        triage_on = bool(ai_conf.get("enabled", False)) and mode in ("triage", "both", "reporting")
+        env_base = os.getenv("OLLAMA_BASE_URL", "").strip()
         return cls(
-            enabled=ai_conf.get("enabled", False),
+            enabled=triage_on,
             provider=local_conf.get("provider", ai_conf.get("provider", "ollama")),
-            base_url=local_conf.get("base_url", ai_conf.get("base_url", "http://127.0.0.1:11434")),
+            base_url=local_conf.get(
+                "base_url",
+                ai_conf.get("base_url", env_base or "http://127.0.0.1:11434"),
+            ) or (env_base or "http://127.0.0.1:11434"),
             model=local_conf.get("model", ai_conf.get("model", "qwen2.5:7b-instruct")),
             timeout=float(local_conf.get("timeout", ai_conf.get("timeout", 45))),
             temperature=float(local_conf.get("temperature", ai_conf.get("temperature", 0.1))),

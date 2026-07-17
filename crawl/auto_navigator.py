@@ -616,14 +616,20 @@ class AutoNavigator:
                         await el.scroll_into_view_if_needed()
                         await el.click(timeout=3_000)
 
-                        # Brief pause to let content render
-                        await asyncio.sleep(random.uniform(0.3, 0.8))
+                        # Human-like pause from action_delay config
+                        delay = random.uniform(*self.config.action_delay)
+                        await asyncio.sleep(delay)
 
                         # Check if navigation happened (new URL)
                         new_url = page.url
-                        if new_url not in self._visited_urls:
+                        if new_url not in self._visited_urls and self._is_in_scope(new_url):
                             self._add_endpoint(new_url, "GET", "auto_navigator_click")
                             self._enqueue(new_url, depth + 1)
+                            # Restore context page when click navigates away mid-explore
+                            try:
+                                await page.go_back(wait_until="domcontentloaded", timeout=8_000)
+                            except Exception:
+                                pass
 
                     except Exception:
                         pass  # Element may be intercepted, stale, or not clickable
@@ -703,7 +709,7 @@ class AutoNavigator:
     # ── Network interception callbacks ────────────────────────────────────
 
     def _on_request(self, request: PWRequest) -> None:
-        """Capture every outgoing request."""
+        """Capture every outgoing request (in-scope only for endpoint discovery)."""
         try:
             url = request.url
             method = request.method
@@ -711,25 +717,32 @@ class AutoNavigator:
 
             # Record all XHR / fetch / websocket requests as discovered endpoints
             if resource_type in ("xhr", "fetch", "websocket"):
-                self._add_endpoint(url, method, f"auto_navigator_{resource_type}")
+                if self._is_in_scope(url):
+                    self._add_endpoint(url, method, f"auto_navigator_{resource_type}")
 
             # Also capture script and document loads
             if resource_type in ("script",) and url.endswith(".js"):
-                if url not in self._captured_js_files:
+                if url not in self._captured_js_files and self._is_in_scope(url):
                     self._captured_js_files.append(url)
         except Exception:
             pass
 
     def _on_response(self, response: PWResponse) -> None:
-        """Record network response metadata."""
+        """Record network response metadata (prefer in-scope URLs)."""
         try:
+            url = response.url
+            if not self._is_in_scope(url):
+                # Still keep a light record for debugging, but mark out-of-scope
+                if response.request.resource_type not in ("xhr", "fetch"):
+                    return
             self._network_requests.append({
-                "url": response.url,
+                "url": url,
                 "method": response.request.method,
                 "status": response.status,
                 "content_type": response.headers.get("content-type", ""),
                 "resource_type": response.request.resource_type,
                 "source": "auto_navigator_network",
+                "in_scope": self._is_in_scope(url),
             })
         except Exception:
             pass

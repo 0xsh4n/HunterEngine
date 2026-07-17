@@ -84,19 +84,45 @@ detection:
   nuclei_severity: ["critical", "high", "medium"]
 
 ai:
-  enabled: true                   # Local AI triage pass; scanner still works if model is unavailable
+  enabled: true
+  # triage = report enrichment only | testing = bug-hunt subagents | both
+  mode: "testing"
   provider: "ollama"              # ollama | openai-compatible | lmstudio | llama.cpp
-  max_findings: 50                # Cap cost/latency for local reasoning
-  min_confidence: 0.2             # Include weak signals only after detectors promote them to findings
+  max_findings: 50                # Cap for reporting triage
+  min_confidence: 0.2
   concurrency: 2
   max_context_chars: 6000
   redact_sensitive: true
+  # Reporting / triage model (used when mode is triage or both)
   local_model:
     base_url: "http://127.0.0.1:11434"
     model: "hf.co/entrick/Security-SLM-Gemma-4-E2B-it-GGUF:Q4_K_M"
     timeout: 45
     temperature: 0.1
-    api_key_env: ""              # For OpenAI-compatible local servers if needed
+    api_key_env: ""
+  # Testing / bug-hunt model — Qwen3 4B with reasoning (Ollama think)
+  testing_model:
+    base_url: "http://127.0.0.1:11434"
+    model: "qwen3:4b"
+    timeout: 90
+    temperature: 0.2
+    think: true                   # Qwen3 reasoning; set false for max speed
+    num_ctx: 8192
+    num_predict: 1536
+    api_key_env: ""
+  testing:
+    enabled: true                 # Also implied when mode is testing/both
+    concurrency: 3                # Parallel subagents + probes
+    max_endpoints: 40             # Ranked endpoints fed to the hunters
+    max_probes_per_agent: 8
+    max_total_probes: 60
+    min_confidence: 0.55
+    subagents:
+      - xss
+      - idor
+      - ssrf
+      - auth
+      - open_redirect
 
 reporting:
   format: ["markdown", "hackerone"]  # markdown | html | hackerone | bugcrowd

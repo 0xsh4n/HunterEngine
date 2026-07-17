@@ -7,7 +7,8 @@ Usage:
     python main.py scan --auto-crawl --headed     # Full scan with visible browser auto-crawl
     python main.py scan --phase recon             # Run only recon phase
     python main.py scan --phase detect            # Run only detection phase
-    python main.py scan --phase ai                # Run only local AI enrichment
+    python main.py scan --phase ai_test          # Local AI bug-hunt subagents (Ollama)
+    python main.py scan --phase ai                # Run only local AI report enrichment
     python main.py crawl https://target.com       # Standalone browser auto-crawl (ZAP-style)
     python main.py crawl https://target.com --headless  # Headless auto-crawl
     python main.py scope                          # Show current scope
@@ -78,7 +79,10 @@ def print_banner() -> None:
 def scan(
     scope: str = typer.Option("config/scope.yaml", help="Path to scope.yaml"),
     settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
-    phase: str = typer.Option("", help="Run specific phase: recon, crawl, detect, correlate, report"),
+    phase: str = typer.Option(
+        "",
+        help="Run specific phase: recon, crawl, ai_test, detect, correlate, ai, report",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate config without scanning"),
     auto_crawl: bool = typer.Option(False, "--auto-crawl", help="Enable integrated browser auto-crawl (ZAP-style)"),
@@ -398,6 +402,8 @@ def print_results(state, elapsed: float) -> None:
     stats_table.add_row("Weak signals", str(len(state.weak_signals)))
     stats_table.add_row("Chained findings", str(len(state.chained_findings)))
     stats_table.add_row("AI enriched findings", str(getattr(state, "ai_enriched_findings", 0)))
+    stats_table.add_row("AI test probes", str(getattr(state, "ai_test_probes", 0)))
+    stats_table.add_row("AI test findings", str(getattr(state, "ai_test_findings", 0)))
     stats_table.add_row("Errors", str(len(state.errors)))
     console.print(Panel(stats_table, title="Scan Statistics", border_style="green"))
 

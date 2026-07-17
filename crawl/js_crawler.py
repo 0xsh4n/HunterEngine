@@ -22,31 +22,36 @@ logger = logging.getLogger("hunterengine.crawl.js")
 class JSCrawler:
     """Headless browser crawler for single-page applications."""
 
+    SPA_MARKERS = (
+        "react", "angular", "vue.js", "vue", "next.js", "nuxt.js", "svelte",
+        "ember", "backbone", "remix", "gatsby",
+    )
+
     def __init__(
         self,
         browser: BrowserEngine,
         scope_loader: Optional[ScopeLoader] = None,
         max_pages: int = 100,
+        tech_stack: Optional[dict] = None,
     ) -> None:
         self.browser = browser
         self.scope = scope_loader
         self.max_pages = max_pages
+        self.tech_stack = tech_stack or {}
 
     async def crawl_spa_targets(self, live_hosts: list[dict]) -> list[dict]:
         """
         Crawl live hosts that are detected as SPAs.
 
-        Args:
-            live_hosts: Output from LiveProber with tech stack info
-
-        Returns:
-            List of discovered endpoint dicts
+        Uses live_hosts.tech, is_spa flag, and optional tech_stack profiles.
         """
-        spa_hosts = [
-            h for h in live_hosts
-            if any(t.lower() in ("react", "angular", "vue.js", "next.js", "nuxt.js", "svelte")
-                   for t in h.get("tech", []))
-        ]
+        spa_hosts = [h for h in live_hosts if self._is_spa_host(h)]
+
+        if not spa_hosts:
+            # Fallback: if tech detection missed, still crawl first few live hosts
+            # when js_rendering was explicitly requested by the caller.
+            logger.info("No SPA tech markers — probing top live hosts with JS crawler")
+            spa_hosts = live_hosts[:5]
 
         if not spa_hosts:
             logger.info("No SPA targets detected — skipping JS crawl")
@@ -64,6 +69,25 @@ class JSCrawler:
                 logger.error(f"JS crawl failed for {url}: {e}")
 
         return all_endpoints
+
+    def _is_spa_host(self, host: dict) -> bool:
+        if host.get("is_spa"):
+            return True
+        tech = [str(t).lower() for t in (host.get("tech") or [])]
+        if any(marker in t for t in tech for marker in self.SPA_MARKERS):
+            return True
+        url = host.get("url", "")
+        profile = self.tech_stack.get(url)
+        if profile is None:
+            return False
+        if getattr(profile, "is_spa", False):
+            return True
+        frameworks = [str(f).lower() for f in (getattr(profile, "frameworks", None) or [])]
+        if isinstance(profile, dict):
+            frameworks = [str(f).lower() for f in (profile.get("frameworks") or [])]
+            if profile.get("is_spa"):
+                return True
+        return any(marker in f for f in frameworks for marker in self.SPA_MARKERS)
 
     async def _crawl_single(self, start_url: str) -> list[dict]:
         """Crawl a single SPA by rendering pages and following links."""
