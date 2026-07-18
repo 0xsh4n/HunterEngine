@@ -11,11 +11,16 @@ Usage:
     python main.py scan --phase ai_test           # Nested AI vuln hunters (Ollama)
     python main.py scan --phase detect            # Classic detectors
     python main.py scan --phase ai                # Local AI report enrichment
+    python main.py scan --resume                  # Resume from latest checkpoint
+    python main.py checkpoints                    # List saved checkpoints
     python main.py crawl https://target.com       # Standalone browser auto-crawl (ZAP-style)
     python main.py crawl https://target.com --headless  # Headless auto-crawl
     python main.py scope                          # Show current scope
     python main.py history                        # Show scan history
     python main.py check-tools                    # Check installed tools (resolves PD vs pip httpx)
+
+Controls during scan:
+    Ctrl+C  → pause at next phase boundary → [r]esume / [q]uit+save / [a]bort
 """
 
 from __future__ import annotations
@@ -93,27 +98,60 @@ def scan(
     auto_crawl: bool = typer.Option(False, "--auto-crawl", help="Enable integrated browser auto-crawl (ZAP-style)"),
     headed: bool = typer.Option(False, "--headed", help="Show the browser window during auto-crawl"),
     no_enum: bool = typer.Option(False, "--no-enum", help="Skip subdomain enumeration and only scan explicitly provided domains"),
+    resume: bool = typer.Option(False, "--resume", "-R", help="Resume from the latest checkpoint"),
+    checkpoint: str = typer.Option(
+        "",
+        "--checkpoint",
+        help="Resume from a specific checkpoint JSON path",
+    ),
 ) -> None:
-    """Run the full scan pipeline or a specific phase."""
+    """Run the full scan pipeline or a specific phase.
+
+    Press Ctrl+C during a scan to pause, then choose resume / quit+save / abort.
+    Use --resume to continue from data/checkpoints/latest.json.
+    """
     setup_logging(verbose)
     print_banner()
 
-    from core.orchestrator import Orchestrator
+    from core.orchestrator import Orchestrator, ScanStopped
+    from core.scan_control import ScanController
 
+    controller = ScanController(interactive=True)
     orchestrator = Orchestrator(
         scope_path=scope,
         settings_path=settings,
         auto_crawl=auto_crawl,
         headed=headed,
         skip_enum=no_enum,
+        controller=controller,
     )
 
     async def run_scan():
         console.print("\n[bold cyan]═══ Initializing HunterEngine ═══[/bold cyan]\n")
+        console.print(
+            "[dim]Controls: Ctrl+C → pause → [r]esume / [q]uit+save / [a]bort[/dim]\n"
+        )
 
         await orchestrator.setup()
 
-        # Print scope summary
+        if resume or checkpoint:
+            cp_path = checkpoint or None
+            console.print(
+                f"[bold yellow]Resuming from checkpoint"
+                f"{f': {cp_path}' if cp_path else ' (latest)'}…[/bold yellow]\n"
+            )
+            if not orchestrator.load_checkpoint(cp_path):
+                console.print("[red]No checkpoint found — start a new scan or check data/checkpoints/[/red]")
+                raise typer.Exit(1)
+            stats = orchestrator.get_stats()
+            console.print(Panel(
+                f"Phase: {stats['phase']}\n"
+                f"Subdomains: {stats['subdomains']} · Live hosts: {stats['live_hosts']}\n"
+                f"Endpoints: {stats['endpoints']} · Findings: {stats['findings']}",
+                title="Restored State",
+                border_style="yellow",
+            ))
+
         scope_summary = orchestrator.scope_loader.summary()
         console.print(Panel(scope_summary, title="Scope", border_style="green"))
 
@@ -125,19 +163,72 @@ def scan(
             mode = "[bold green]HEADED[/bold green]" if headed else "[bold yellow]HEADLESS[/bold yellow]"
             console.print(f"\n[bold cyan]🕷️  Auto-crawl enabled ({mode} browser)[/bold cyan]\n")
 
-        # Run scan
         phases = [phase] if phase else None
         start = time.time()
 
         console.print("\n[bold cyan]═══ Starting Scan ═══[/bold cyan]\n")
-        state = await orchestrator.run(phases=phases)
-        elapsed = time.time() - start
+        try:
+            state = await orchestrator.run(phases=phases)
+        except ScanStopped as stop:
+            elapsed = time.time() - start
+            if stop.action == "quit":
+                console.print(
+                    f"\n[yellow]Scan quit after {elapsed:.0f}s — checkpoint saved.[/yellow]\n"
+                    f"[dim]Resume with: python main.py scan --resume[/dim]\n"
+                )
+                if orchestrator.last_checkpoint_path:
+                    console.print(f"[dim]{orchestrator.last_checkpoint_path}[/dim]\n")
+            else:
+                console.print(f"\n[red]Scan aborted after {elapsed:.0f}s (not saved).[/red]\n")
+            print_results(orchestrator.state, elapsed)
+            raise typer.Exit(0 if stop.action == "quit" else 130)
 
-        # Print results dashboard
+        elapsed = time.time() - start
         print_results(state, elapsed)
 
     asyncio.run(run_scan())
 
+
+@app.command(name="checkpoints")
+def checkpoints_cmd(
+    directory: str = typer.Option("data/checkpoints", help="Checkpoint directory"),
+) -> None:
+    """List saved scan checkpoints (for --resume)."""
+    setup_logging(False)
+    from core.checkpoint import CheckpointStore
+
+    store = CheckpointStore(directory)
+    rows = store.list_checkpoints()
+    latest = store.latest_path()
+
+    if not rows and not latest:
+        console.print("[yellow]No checkpoints found.[/yellow]")
+        console.print(f"[dim]Directory: {directory}[/dim]")
+        return
+
+    table = Table(title="Scan Checkpoints")
+    table.add_column("Saved (UTC)", style="cyan")
+    table.add_column("Reason")
+    table.add_column("Next phase", style="green")
+    table.add_column("Hosts", justify="right")
+    table.add_column("Endpoints", justify="right")
+    table.add_column("Findings", justify="right")
+    table.add_column("Path", style="dim", max_width=40)
+
+    for row in rows[:20]:
+        table.add_row(
+            str(row.get("saved_at", ""))[:19],
+            str(row.get("reason", "")),
+            str(row.get("next_phase") or "—"),
+            str(row.get("live_hosts", 0)),
+            str(row.get("endpoints", 0)),
+            str(row.get("findings", 0)),
+            str(row.get("path", "")),
+        )
+    console.print(table)
+    if latest:
+        console.print(f"\n[bold]Latest pointer:[/bold] {latest}")
+        console.print("[dim]Resume: python main.py scan --resume[/dim]")
 
 @app.command()
 def crawl(

@@ -38,6 +38,24 @@ class AgentContext:
     def ai_config(self) -> dict[str, Any]:
         return self.settings.get("ai", {}) or {}
 
+    @property
+    def controller(self) -> Any:
+        return self.extras.get("controller")
+
+    async def check_control(self, label: str = "") -> None:
+        """Raise ScanStopped if user quit/abort; wait if paused."""
+        ctrl = self.controller
+        if not ctrl:
+            return
+        from core.orchestrator import ScanStopped
+        from core.scan_control import ControlAction
+
+        action = await ctrl.checkpoint(label or self.name)
+        if action == ControlAction.QUIT:
+            raise ScanStopped("quit", message=f"Quit during {label or self.name}")
+        if action == ControlAction.ABORT:
+            raise ScanStopped("abort", message=f"Abort during {label or self.name}")
+
 
 class PhaseAgent(ABC):
     """

@@ -151,11 +151,13 @@ class TestingAgent:
         rate_limiter: Optional[RateLimiter] = None,
         waf_bypass: Optional[WAFBypass] = None,
         scope_loader: Optional[ScopeLoader] = None,
+        controller: Any = None,
     ) -> None:
         self.config = config
         self.rate_limiter = rate_limiter
         self.waf_bypass = waf_bypass
         self.scope = scope_loader
+        self.controller = controller
         self.client = OllamaClient(config.to_client_config())
         self._sem = asyncio.Semaphore(max(1, config.concurrency))
         self._probe_sem = asyncio.Semaphore(max(1, config.concurrency))
@@ -259,6 +261,7 @@ class TestingAgent:
         )
 
         context = self._compact_context(scan_state)
+        await self._control_gate("ai_test:plan")
         plans = await self._run_subagents(targets, context)
         probes = self._merge_probes(plans)
         if not probes:
@@ -266,6 +269,7 @@ class TestingAgent:
             return []
 
         logger.info("AI bug hunter executing %d probe(s)", len(probes))
+        await self._control_gate("ai_test:execute")
         findings = await self._execute_probes(probes)
 
         setattr(scan_state, "ai_test_probes", len(probes))

@@ -24,8 +24,19 @@ from core.waf_bypass import WAFBypass, BypassConfig
 from core.session_manager import SessionManager
 from core.browser_engine import BrowserEngine, BrowserConfig
 from core.proxy_engine import ProxyEngine, ProxyConfig, find_available_port, is_port_available
+from core.scan_control import ScanController, ControlAction
+from core.checkpoint import CheckpointStore
 
 logger = logging.getLogger("hunterengine.orchestrator")
+
+
+class ScanStopped(Exception):
+    """Raised when the user quits or aborts a scan via ScanController."""
+
+    def __init__(self, action: str, message: str = "", saved: bool = False) -> None:
+        self.action = action
+        self.saved = saved
+        super().__init__(message or f"Scan stopped ({action})")
 
 
 class ScanPhase(str, Enum):
@@ -99,6 +110,8 @@ class Orchestrator:
         auto_crawl: bool = False,
         headed: bool = False,
         skip_enum: bool = False,
+        controller: Optional[ScanController] = None,
+        checkpoint_dir: Optional[str] = None,
     ) -> None:
         self.scope_path = scope_path
         self.settings_path = settings_path
@@ -117,6 +130,12 @@ class Orchestrator:
         self._proxy_host = "127.0.0.1"
         self._proxy_port = 8080
         self._proxy_enabled = False
+
+        self.controller = controller or ScanController()
+        self.checkpoints = CheckpointStore(checkpoint_dir)
+        self._completed_phases: list[str] = []
+        self._resume_skip: set[str] = set()
+        self.last_checkpoint_path: Optional[Path] = None
 
     def load_settings(self) -> dict[str, Any]:
         """Load settings.yaml."""
@@ -143,7 +162,77 @@ class Orchestrator:
             proxy_enabled=self._proxy_enabled,
             proxy_host=self._proxy_host,
             proxy_port=self._proxy_port,
+            extras={"controller": self.controller},
         )
+
+    def load_checkpoint(self, path: Optional[str] = None) -> bool:
+        """Load scan state from a checkpoint; prepare phase skip set for resume."""
+        data = self.checkpoints.load(path)
+        if not data:
+            return False
+        completed = self.checkpoints.apply_to_state(self.state, data)
+        self._completed_phases = list(completed)
+        self._resume_skip = set(completed)
+        next_phase = data.get("next_phase")
+        if next_phase:
+            # Skip everything before next_phase in the default pipeline order
+            order = [
+                ScanPhase.RECON.value,
+                ScanPhase.ACTIVE_RECON.value,
+                ScanPhase.CRAWL.value,
+                ScanPhase.AI_TEST.value,
+                ScanPhase.DETECT.value,
+                ScanPhase.CORRELATE.value,
+                ScanPhase.AI.value,
+                ScanPhase.REPORT.value,
+            ]
+            if next_phase in order:
+                idx = order.index(next_phase)
+                self._resume_skip.update(order[:idx])
+        logger.info(
+            "Resume ready — skipping completed phases: %s (next=%s)",
+            sorted(self._resume_skip) or "(none)",
+            next_phase,
+        )
+        return True
+
+    def _save_checkpoint(
+        self,
+        reason: str,
+        next_phase: Optional[str] = None,
+    ) -> Optional[Path]:
+        try:
+            path = self.checkpoints.save(
+                self.state,
+                reason=reason,
+                completed_phases=list(self._completed_phases),
+                next_phase=next_phase,
+                meta={
+                    "scope_path": self.scope_path,
+                    "settings_path": self.settings_path,
+                    "auto_crawl": self.auto_crawl,
+                    "headed": self.headed,
+                    "skip_enum": self.skip_enum,
+                },
+            )
+            self.last_checkpoint_path = path
+            return path
+        except Exception as exc:
+            logger.error("Failed to save checkpoint: %s", exc)
+            return None
+
+    async def _handle_control(self, label: str, next_phase: Optional[str] = None) -> None:
+        """Process pause/quit/abort at a safe boundary."""
+        action = await self.controller.checkpoint(label)
+        if action == ControlAction.CONTINUE:
+            return
+        if action == ControlAction.QUIT:
+            path = self._save_checkpoint("quit", next_phase=next_phase or label)
+            raise ScanStopped("quit", saved=bool(path), message=f"Quit — checkpoint: {path}")
+        if action == ControlAction.ABORT:
+            raise ScanStopped("abort", saved=False, message="Aborted without saving")
+        # PAUSE shouldn't remain after prompt; treat as continue
+        return
 
     @staticmethod
     def normalize_phases(phases: Optional[list[str]]) -> Optional[list[str]]:
@@ -241,6 +330,9 @@ class Orchestrator:
         """
         Run the full scan pipeline, or specific phases.
 
+        Supports Ctrl+C pause → resume / quit (save) / abort.
+        Auto-checkpoints after each completed phase for ``--resume``.
+
         Args:
             phases: Optional list of phase names to run.
                     If None, runs all phases in order.
@@ -258,15 +350,27 @@ class Orchestrator:
             (ScanPhase.REPORT, self._run_report),
         ]
 
+        self.controller.install()
+        logger.info("Controls: Ctrl+C to pause → [r]esume / [q]uit+save / [a]bort")
+
         if self.proxy:
             await self.proxy.start()
         if self.browser:
             await self.browser.start()
 
         try:
-            for phase, runner in all_phases:
+            for i, (phase, runner) in enumerate(all_phases):
                 if phases and phase.value not in phases:
                     continue
+                if phase.value in self._resume_skip:
+                    logger.info("═══ Skipping completed phase: %s ═══", phase.value.upper())
+                    if phase.value not in self._completed_phases:
+                        self._completed_phases.append(phase.value)
+                    continue
+
+                # Pause/quit check before starting a phase
+                next_name = phase.value
+                await self._handle_control(f"before:{next_name}", next_phase=next_name)
 
                 self.state.phase = phase
                 logger.info(f"═══ Starting phase: {phase.value.upper()} ═══")
@@ -274,18 +378,53 @@ class Orchestrator:
 
                 try:
                     await runner()
+                except ScanStopped:
+                    raise
                 except Exception as e:
                     logger.error(f"Phase {phase.value} failed: {e}")
                     self.state.errors.append(f"{phase.value}: {str(e)}")
+                    self._save_checkpoint("error", next_phase=phase.value)
                     if phase in (ScanPhase.RECON, ScanPhase.ACTIVE_RECON):
                         raise
 
                 elapsed = time.time() - phase_start
                 logger.info(f"═══ Phase {phase.value} completed in {elapsed:.1f}s ═══")
 
-            self.state.phase = ScanPhase.DONE
+                if phase.value not in self._completed_phases:
+                    self._completed_phases.append(phase.value)
 
+                # Determine next phase for checkpoint metadata
+                upcoming = None
+                for later_phase, _ in all_phases[i + 1:]:
+                    if phases and later_phase.value not in phases:
+                        continue
+                    if later_phase.value in self._resume_skip:
+                        continue
+                    upcoming = later_phase.value
+                    break
+
+                self._save_checkpoint("phase", next_phase=upcoming)
+
+                # Pause/quit check after phase
+                await self._handle_control(phase.value, next_phase=upcoming)
+
+            self.state.phase = ScanPhase.DONE
+            # Clear latest resume pointer on successful completion
+            try:
+                latest = self.checkpoints.directory / "latest.json"
+                if latest.exists():
+                    done_path = self._save_checkpoint("done", next_phase=None)
+                    logger.info("Scan finished — final checkpoint: %s", done_path)
+            except Exception:
+                pass
+
+        except ScanStopped as stop:
+            logger.warning("%s", stop)
+            if stop.action == "quit" and not stop.saved:
+                self._save_checkpoint("quit", next_phase=self.state.phase.value)
+            raise
         finally:
+            self.controller.uninstall()
             if self.browser:
                 await self.browser.stop()
             if self.proxy:

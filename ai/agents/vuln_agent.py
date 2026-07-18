@@ -41,11 +41,13 @@ class VulnHuntAgent(PhaseAgent):
             rate_limiter=self.ctx.rate_limiter,
             waf_bypass=self.ctx.waf_bypass,
             scope_loader=self.ctx.scope_loader,
+            controller=self.ctx.controller,
         )
         self.info(
             "dispatching nested hunters: %s",
             ", ".join(config.subagents),
         )
+        await self.ctx.check_control("vuln_hunt:start")
         findings = await agent.run(state)
 
         threshold = (
