@@ -120,9 +120,13 @@ ai:
     subagents:
       - xss
       - idor
+      - ssti
       - ssrf
       - auth
       - open_redirect
+      - request_smuggling
+      - cors
+      - jwt
 
 reporting:
   format: ["markdown", "hackerone"]  # markdown | html | hackerone | bugcrowd

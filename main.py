@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-HunterEngine — Automated Bug Bounty Reconnaissance & Detection
+HunterEngine v3 — Automated Bug Bounty Reconnaissance & Detection
 
 Usage:
     python main.py scan                           # Full pipeline scan
     python main.py scan --auto-crawl --headed     # Full scan with visible browser auto-crawl
-    python main.py scan --phase recon             # Run only recon phase
-    python main.py scan --phase detect            # Run only detection phase
-    python main.py scan --phase ai_test          # Local AI bug-hunt subagents (Ollama)
-    python main.py scan --phase ai                # Run only local AI report enrichment
+    python main.py scan --phase recon             # Passive recon agent
+    python main.py scan --phase active_recon      # Live probe + tech fingerprint agent
+    python main.py scan --phase enumeration       # Crawl / endpoint enumeration agent
+    python main.py scan --phase ai_test           # Nested AI vuln hunters (Ollama)
+    python main.py scan --phase detect            # Classic detectors
+    python main.py scan --phase ai                # Local AI report enrichment
     python main.py crawl https://target.com       # Standalone browser auto-crawl (ZAP-style)
     python main.py crawl https://target.com --headless  # Headless auto-crawl
     python main.py scope                          # Show current scope
     python main.py history                        # Show scan history
-    python main.py check-tools                    # Check installed tools
+    python main.py check-tools                    # Check installed tools (resolves PD vs pip httpx)
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ def print_banner() -> None:
  ███████╗██║ ╚████║╚██████╔╝██║██║ ╚████║███████╗
  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝╚══════╝
     """
-    console.print(Panel(banner, title="v2.0.0", border_style="blue"))
+    console.print(Panel(banner, title="v3.0.0", border_style="blue"))
 
 
 # ── Commands ──────────────────────────────────────────────────────────────
@@ -81,7 +83,10 @@ def scan(
     settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
     phase: str = typer.Option(
         "",
-        help="Run specific phase: recon, crawl, ai_test, detect, correlate, ai, report",
+        help=(
+            "Run specific phase: recon, active_recon, crawl|enumeration, "
+            "ai_test|vuln, detect, correlate, ai, report"
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate config without scanning"),
@@ -354,10 +359,29 @@ def check_tools() -> None:
     for category, tool_list in tools.items():
         for tool in tool_list:
             found = tool_found(tool)
-            status = "[green]✓ installed[/green]" if found else "[red]✗ missing[/red]"
+            if tool == "httpx" and found:
+                status = f"[green]✓ PD binary[/green]\n[dim]{pd_httpx}[/dim]"
+            elif tool == "httpx":
+                status = "[yellow]✗ PD missing[/yellow]\n[dim]probe falls back to pip httpx[/dim]"
+            else:
+                status = "[green]✓ installed[/green]" if found else "[red]✗ missing[/red]"
             table.add_row(category, tool, status)
 
     console.print(table)
+
+    # httpx dual-use resolution
+    from core.tool_resolver import describe_httpx_resolution
+
+    hx = describe_httpx_resolution()
+    hx_table = Table(title="httpx Resolution (pip vs ProjectDiscovery)")
+    hx_table.add_column("Role", style="cyan")
+    hx_table.add_column("Value", style="white")
+    hx_table.add_row("ProjectDiscovery httpx", hx["projectdiscovery_httpx"])
+    hx_table.add_row("pip httpx library (venv)", hx["pip_httpx_library"])
+    hx_table.add_row("pip httpx CLI (ignored)", hx["pip_httpx_cli"])
+    hx_table.add_row("Note", hx["note"])
+    console.print("\n")
+    console.print(hx_table)
 
     # Python packages
     console.print("\n")

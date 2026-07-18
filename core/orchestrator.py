@@ -1,15 +1,14 @@
 """
 Pipeline orchestrator.
 
-Coordinates the full scan lifecycle:
-  Scope → Recon → Crawl → AI Test → Detect → Correlate → AI Triage → Report
+Coordinates the full scan lifecycle via hierarchical agents:
+  Scope → Recon → Active Recon → Enumeration → AI Vuln Hunt → Detect → Correlate → AI Triage → Report
 
 Manages concurrency, module loading, and data flow between stages.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -32,13 +31,24 @@ logger = logging.getLogger("hunterengine.orchestrator")
 class ScanPhase(str, Enum):
     INIT = "init"
     RECON = "recon"
-    CRAWL = "crawl"
+    ACTIVE_RECON = "active_recon"
+    CRAWL = "crawl"  # enumeration (alias: enumeration)
     AI_TEST = "ai_test"
     DETECT = "detect"
     CORRELATE = "correlate"
     AI = "ai"
     REPORT = "report"
     DONE = "done"
+
+
+# CLI aliases → canonical phase value
+PHASE_ALIASES: dict[str, str] = {
+    "enumeration": ScanPhase.CRAWL.value,
+    "enum": ScanPhase.CRAWL.value,
+    "vuln": ScanPhase.AI_TEST.value,
+    "vuln_hunt": ScanPhase.AI_TEST.value,
+    "passive_recon": ScanPhase.RECON.value,
+}
 
 
 @dataclass
@@ -53,7 +63,7 @@ class ScanState:
     historical_urls: list[str] = field(default_factory=list)
     tech_stack: dict[str, Any] = field(default_factory=dict)
 
-    # Crawl outputs
+    # Crawl / enumeration outputs
     endpoints: list[dict] = field(default_factory=list)
     js_files: list[str] = field(default_factory=list)
     params: dict[str, list[str]] = field(default_factory=dict)
@@ -78,8 +88,8 @@ class Orchestrator:
     """
     Central pipeline coordinator.
 
-    Loads settings, initializes all subsystems, and runs the
-    scan pipeline in order with proper error handling and state management.
+    Loads settings, initializes subsystems, and runs hierarchical agents
+    in phase order with error handling and state management.
     """
 
     def __init__(
@@ -98,15 +108,15 @@ class Orchestrator:
         self.headed = headed
         self.skip_enum = skip_enum
 
-        # Subsystems (initialized in setup())
         self.scope_loader: Optional[ScopeLoader] = None
         self.rate_limiter: Optional[RateLimiter] = None
         self.waf_bypass: Optional[WAFBypass] = None
         self.session_mgr: Optional[SessionManager] = None
         self.browser: Optional[BrowserEngine] = None
         self.proxy: Optional[ProxyEngine] = None
-
-    # ── Setup ─────────────────────────────────────────────────────────────
+        self._proxy_host = "127.0.0.1"
+        self._proxy_port = 8080
+        self._proxy_enabled = False
 
     def load_settings(self) -> dict[str, Any]:
         """Load settings.yaml."""
@@ -117,16 +127,43 @@ class Orchestrator:
         self.settings = yaml.safe_load(path.read_text()) or {}
         return self.settings
 
+    def _agent_context(self):
+        from ai.agents import AgentContext
+
+        return AgentContext(
+            settings=self.settings,
+            scope_loader=self.scope_loader,
+            rate_limiter=self.rate_limiter,
+            waf_bypass=self.waf_bypass,
+            browser=self.browser,
+            session_mgr=self.session_mgr,
+            auto_crawl=self.auto_crawl,
+            headed=self.headed,
+            skip_enum=self.skip_enum,
+            proxy_enabled=self._proxy_enabled,
+            proxy_host=self._proxy_host,
+            proxy_port=self._proxy_port,
+        )
+
+    @staticmethod
+    def normalize_phases(phases: Optional[list[str]]) -> Optional[list[str]]:
+        """Resolve CLI aliases (enumeration → crawl, vuln → ai_test, …)."""
+        if not phases:
+            return None
+        resolved = []
+        for p in phases:
+            key = (p or "").strip().lower()
+            resolved.append(PHASE_ALIASES.get(key, key))
+        return resolved
+
     async def setup(self) -> None:
         """Initialize all subsystems from config."""
         self.load_settings()
 
-        # Scope
         self.scope_loader = ScopeLoader(self.scope_path)
         self.scope_loader.load()
         logger.info(f"Scope loaded:\n{self.scope_loader.summary()}")
 
-        # Rate limiter
         rl_conf = self.settings.get("rate_limiting", {})
         self.rate_limiter = RateLimiter(
             global_rps=rl_conf.get("requests_per_second", 10),
@@ -137,7 +174,6 @@ class Orchestrator:
             backoff_max=rl_conf.get("backoff_max", 120),
         )
 
-        # WAF bypass
         waf_conf = self.settings.get("waf_bypass", {})
         ip_conf = waf_conf.get("ip_rotation", {})
         self.waf_bypass = WAFBypass(BypassConfig(
@@ -149,13 +185,10 @@ class Orchestrator:
             ip_rotation_regions=ip_conf.get("regions", ["us-east-1"]),
         ))
 
-        # Session manager
-        db_conf = self.settings.get("database", {})
         self.session_mgr = SessionManager(
             sessions_dir=Path(self.settings.get("general", {}).get("data_dir", "data")) / "sessions"
         )
 
-        # Proxy
         proxy_conf = self.settings.get("proxy", {})
         proxy_host = proxy_conf.get("listen_host", "127.0.0.1")
         proxy_port = proxy_conf.get("listen_port", 8080)
@@ -188,7 +221,6 @@ class Orchestrator:
                 intercept_mode=proxy_conf.get("intercept_mode", False),
             ))
 
-        # Browser — use the effective proxy port (may have been remapped)
         browser_conf = self.settings.get("browser", {})
         effective_proxy_enabled = bool(proxy_conf.get("enabled", True) and self.proxy)
         self.browser = BrowserEngine(BrowserConfig(
@@ -199,14 +231,11 @@ class Orchestrator:
             screenshot_dir=browser_conf.get("screenshot_dir", "data/screenshots"),
             chromium_args=browser_conf.get("chromium_args", []),
         ))
-        # Stash effective proxy for crawl/auto-navigator (avoids listen_port desync)
         self._proxy_host = proxy_host
         self._proxy_port = proxy_port
         self._proxy_enabled = effective_proxy_enabled
 
         self.state.phase = ScanPhase.INIT
-
-    # ── Pipeline ──────────────────────────────────────────────────────────
 
     async def run(self, phases: Optional[list[str]] = None) -> ScanState:
         """
@@ -216,8 +245,11 @@ class Orchestrator:
             phases: Optional list of phase names to run.
                     If None, runs all phases in order.
         """
+        phases = self.normalize_phases(phases)
+
         all_phases = [
             (ScanPhase.RECON, self._run_recon),
+            (ScanPhase.ACTIVE_RECON, self._run_active_recon),
             (ScanPhase.CRAWL, self._run_crawl),
             (ScanPhase.AI_TEST, self._run_ai_test),
             (ScanPhase.DETECT, self._run_detect),
@@ -226,7 +258,6 @@ class Orchestrator:
             (ScanPhase.REPORT, self._run_report),
         ]
 
-        # Start proxy and browser
         if self.proxy:
             await self.proxy.start()
         if self.browser:
@@ -246,8 +277,8 @@ class Orchestrator:
                 except Exception as e:
                     logger.error(f"Phase {phase.value} failed: {e}")
                     self.state.errors.append(f"{phase.value}: {str(e)}")
-                    if phase in (ScanPhase.RECON,):
-                        raise  # Critical phase — abort
+                    if phase in (ScanPhase.RECON, ScanPhase.ACTIVE_RECON):
+                        raise
 
                 elapsed = time.time() - phase_start
                 logger.info(f"═══ Phase {phase.value} completed in {elapsed:.1f}s ═══")
@@ -255,7 +286,6 @@ class Orchestrator:
             self.state.phase = ScanPhase.DONE
 
         finally:
-            # Cleanup
             if self.browser:
                 await self.browser.stop()
             if self.proxy:
@@ -263,224 +293,29 @@ class Orchestrator:
 
         return self.state
 
-    # ── Phase runners ─────────────────────────────────────────────────────
-
     async def _run_recon(self) -> None:
-        """Recon phase: subdomain enum → DNS resolve → live probe → historical URLs."""
-        from recon.subdomain_enum import SubdomainEnumerator
-        from recon.dns_resolver import DNSResolver
-        from recon.live_prober import LiveProber
-        from recon.historical_urls import HistoricalURLCollector
-        from recon.tech_fingerprint import TechFingerprinter
+        """Passive recon agent: subdomain enum → DNS → historical URLs."""
+        from ai.agents import ReconAgent
 
-        domains = self.scope_loader.get_root_domains()
-        logger.info(f"Recon targets: {domains}")
+        await ReconAgent(self._agent_context()).run(self.state)
 
-        # Subdomain enumeration
-        if self.skip_enum:
-            logger.info("Skipping subdomain enumeration (using provided domains only)")
-            self.state.subdomains = domains[:]
-        else:
-            enumerator = SubdomainEnumerator()
-            for domain in domains:
-                subs = await enumerator.enumerate(domain)
-                self.state.subdomains.extend(subs)
-            self.state.subdomains = list(set(self.state.subdomains))
-            logger.info(f"Found {len(self.state.subdomains)} unique subdomains")
+    async def _run_active_recon(self) -> None:
+        """Active recon agent: live probe → tech fingerprint."""
+        from ai.agents import ActiveReconAgent
 
-        # Filter to in-scope
-        old_subdomains = self.state.subdomains[:]
-        original_count = len(old_subdomains)
-        if original_count > 0:
-            logger.debug(f"Sample before filtering: {old_subdomains[:3]}")
-            
-        self.state.subdomains = self.scope_loader.filter_in_scope(self.state.subdomains)
-        
-        if original_count > 0 and len(self.state.subdomains) == 0:
-            logger.warning("All subdomains were filtered out by ScopeLoader! Check if scope.yaml has a wildcard (e.g., *.domain.com).")
-            logger.warning(f"First rejected item was exactly: {repr(old_subdomains[0] if old_subdomains else 'none')}")
-
-        # DNS resolution
-        resolver = DNSResolver()
-        resolved = await resolver.resolve_bulk(self.state.subdomains)
-        self.state.subdomains = [r["hostname"] for r in resolved if r.get("resolved")]
-
-        # Live host probing
-        prober = LiveProber(rate_limiter=self.rate_limiter, waf_bypass=self.waf_bypass)
-        self.state.live_hosts = await prober.probe_hosts(self.state.subdomains)
-        logger.info(f"Live hosts: {len(self.state.live_hosts)}")
-
-        # Historical URLs
-        collector = HistoricalURLCollector()
-        for domain in domains:
-            urls = await collector.collect(domain)
-            self.state.historical_urls.extend(urls)
-        self.state.historical_urls = self.scope_loader.filter_in_scope(
-            list(set(self.state.historical_urls))
-        )
-
-        # Tech fingerprinting
-        fingerprinter = TechFingerprinter()
-        for host_info in self.state.live_hosts[:50]:  # Top 50
-            tech = await fingerprinter.detect(host_info.get("url", ""))
-            url = host_info.get("url", "")
-            self.state.tech_stack[url] = tech
+        await ActiveReconAgent(self._agent_context()).run(self.state)
 
     async def _run_crawl(self) -> None:
-        """Crawl phase: auto-navigator + active crawl → JS crawl → JS analysis → param mining."""
-        from crawl.active_crawler import ActiveCrawler
-        from crawl.js_crawler import JSCrawler
-        from crawl.js_analyzer import JSAnalyzer
-        from crawl.param_miner import ParamMiner
-        from crawl.graphql_mapper import GraphQLMapper
+        """Enumeration agent: crawl → JS → GraphQL → params."""
+        from ai.agents import EnumerationAgent
 
-        crawl_conf = self.settings.get("crawl", {})
-        live_urls = [h.get("url", "") for h in self.state.live_hosts if h.get("url")]
-        # Seed with historical URLs (in-scope) so crawl covers Wayback/gau surface
-        historical_seeds = [
-            u for u in (self.state.historical_urls or [])[:150]
-            if u and (not self.scope_loader or self.scope_loader.is_in_scope(u))
-        ]
-        urls_to_crawl = list(dict.fromkeys(live_urls + historical_seeds))
-
-        # Merge tech_stack fingerprints into live_hosts for SPA detection
-        self._enrich_live_hosts_tech()
-
-        # ── Auto-navigator (integrated browser crawl) ─────────────────────
-        if self.auto_crawl:
-            from crawl.auto_navigator import AutoNavigator, NavigatorConfig
-
-            proxy_url = ""
-            if getattr(self, "_proxy_enabled", False):
-                proxy_url = f"http://{self._proxy_host}:{self._proxy_port}"
-
-            nav_config = NavigatorConfig(
-                headless=not self.headed,  # headed=True → visible browser
-                max_pages=crawl_conf.get("max_pages", 500),
-                max_depth=crawl_conf.get("max_depth", 10),
-                page_timeout=self.settings.get("browser", {}).get("page_timeout", 30_000),
-                form_submit=crawl_conf.get("form_fill", False),
-                screenshot_dir=self.settings.get("browser", {}).get("screenshot_dir", "data/screenshots"),
-                proxy_url=proxy_url,
-                chromium_args=self.settings.get("browser", {}).get("chromium_args", [
-                    "--disable-gpu",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ]),
-            )
-            navigator = AutoNavigator(config=nav_config, scope_loader=self.scope_loader)
-            nav_results = await navigator.crawl(urls_to_crawl[:50] or live_urls)
-            self.state.endpoints.extend(nav_results.get("endpoints", []))
-            self.state.js_files.extend(nav_results.get("js_files", []))
-            # Promote in-scope network XHR/fetch into endpoints
-            for req in nav_results.get("network_requests", []) or []:
-                req_url = req.get("url", "")
-                if not req_url:
-                    continue
-                if self.scope_loader and not self.scope_loader.is_in_scope(req_url):
-                    continue
-                if req.get("resource_type") in ("xhr", "fetch", "websocket", "document"):
-                    self.state.endpoints.append({
-                        "url": req_url,
-                        "method": req.get("method", "GET"),
-                        "source": "auto_navigator_network",
-                        "status": req.get("status", 0),
-                    })
-            logger.info(
-                "Auto-navigator: %d endpoints, %d JS files, %d network requests",
-                len(nav_results.get("endpoints", [])),
-                len(nav_results.get("js_files", [])),
-                len(nav_results.get("network_requests", [])),
-            )
-
-        # ── External tool crawling (katana, gospider, hakrawler) ──────────
-        crawler = ActiveCrawler(
-            rate_limiter=self.rate_limiter,
-            waf_bypass=self.waf_bypass,
-            max_depth=crawl_conf.get("max_depth", 5),
-        )
-        crawl_results = await crawler.crawl(urls_to_crawl[:80] or live_urls)
-        self.state.endpoints.extend(crawl_results.get("endpoints", []))
-        self.state.js_files.extend(crawl_results.get("js_files", []))
-
-        # JS rendering for SPAs (uses tech on live_hosts + tech_stack)
-        if crawl_conf.get("js_rendering", True) and self.browser:
-            js_crawler = JSCrawler(
-                browser=self.browser,
-                scope_loader=self.scope_loader,
-                tech_stack=self.state.tech_stack,
-            )
-            spa_endpoints = await js_crawler.crawl_spa_targets(self.state.live_hosts)
-            self.state.endpoints.extend(spa_endpoints)
-
-        # GraphQL discovery / introspection
-        try:
-            mapper = GraphQLMapper()
-            graphql_maps = await mapper.map_all(live_urls[:30])
-            self.state.graphql_schemas = graphql_maps
-            for gq in graphql_maps:
-                self.state.endpoints.append({
-                    "url": gq.get("url", ""),
-                    "method": "POST",
-                    "source": "graphql_mapper",
-                    "introspection": gq.get("introspection_enabled", False),
-                })
-            if graphql_maps:
-                logger.info("GraphQL mapper: %d endpoint(s)", len(graphql_maps))
-        except Exception as exc:
-            logger.warning("GraphQL mapping failed: %s", exc)
-
-        # JS analysis
-        analyzer = JSAnalyzer()
-        for js_url in list(dict.fromkeys(self.state.js_files))[:200]:
-            findings = await analyzer.analyze(js_url)
-            self.state.weak_signals.extend(findings.get("secrets", []))
-            self.state.endpoints.extend(findings.get("endpoints", []))
-
-        # Parameter mining
-        miner = ParamMiner(rate_limiter=self.rate_limiter)
-        target_urls = [ep.get("url", "") for ep in self.state.endpoints[:100]]
-        params = await miner.discover(target_urls)
-        self.state.params.update(params)
-
-        # Deduplicate endpoints by method+url (keep distinct verbs)
-        seen: set[str] = set()
-        unique: list[dict] = []
-        for ep in self.state.endpoints:
-            url = ep.get("url", "")
-            if not url:
-                continue
-            if self.scope_loader and not self.scope_loader.is_in_scope(url):
-                continue
-            key = f"{(ep.get('method') or 'GET').upper()}:{url}"
-            if key not in seen:
-                seen.add(key)
-                unique.append(ep)
-        self.state.endpoints = unique
-        self.state.js_files = list(dict.fromkeys(self.state.js_files))
+        await EnumerationAgent(self._agent_context()).run(self.state)
 
     async def _run_ai_test(self) -> None:
-        """AI testing phase: local Ollama bug-hunt subagents (not reporting)."""
-        from ai import TestingAIConfig, TestingAgent
+        """Vuln hunt agent: nested IDOR / SSTI / smuggling / XSS / … hunters."""
+        from ai.agents import VulnHuntAgent
 
-        config = TestingAIConfig.from_settings(self.settings)
-        if not config.enabled:
-            logger.info("AI testing mode disabled")
-            return
-
-        agent = TestingAgent(
-            config=config,
-            rate_limiter=self.rate_limiter,
-            waf_bypass=self.waf_bypass,
-            scope_loader=self.scope_loader,
-        )
-        findings = await agent.run(self.state)
-        threshold = self.settings.get("detection", {}).get("confidence_threshold", 0.6)
-        for finding in findings:
-            if finding.get("confidence", 0) >= threshold:
-                self.state.findings.append(finding)
-            else:
-                self.state.weak_signals.append(finding)
+        await VulnHuntAgent(self._agent_context()).run(self.state)
 
     async def _run_detect(self) -> None:
         """Detection phase: run enabled detection modules."""
@@ -488,7 +323,6 @@ class Orchestrator:
         modules_conf = det_conf.get("modules", {})
         threshold = det_conf.get("confidence_threshold", 0.6)
 
-        # Dynamic module loading
         detector_map = {
             "secrets": "detection.secrets_detector.SecretsDetector",
             "cors": "detection.cors_detector.CORSDetector",
@@ -558,35 +392,6 @@ class Orchestrator:
         reasoner = LocalAIReasoner(config)
         await reasoner.enrich_findings(self.state.findings, self.state)
 
-    def _enrich_live_hosts_tech(self) -> None:
-        """Merge TechProfile fingerprints into live_hosts.tech for SPA gating."""
-        for host in self.state.live_hosts:
-            url = host.get("url", "")
-            profile = self.state.tech_stack.get(url)
-            existing = list(host.get("tech") or [])
-            if profile is None:
-                continue
-            names: list[str] = []
-            if hasattr(profile, "frameworks"):
-                names.extend(getattr(profile, "frameworks", []) or [])
-                names.extend(getattr(profile, "js_libraries", []) or [])
-                if getattr(profile, "is_spa", False):
-                    host["is_spa"] = True
-                if getattr(profile, "has_graphql", False):
-                    host["has_graphql"] = True
-            elif isinstance(profile, dict):
-                names.extend(profile.get("frameworks", []) or [])
-                names.extend(profile.get("tech", []) or [])
-                host["is_spa"] = bool(profile.get("is_spa", host.get("is_spa", False)))
-            merged = []
-            seen_lower: set[str] = set()
-            for name in existing + [str(n) for n in names]:
-                key = name.lower()
-                if key and key not in seen_lower:
-                    seen_lower.add(key)
-                    merged.append(name)
-            host["tech"] = merged
-
     async def _run_report(self) -> None:
         """Report phase: generate output reports."""
         from reporting.triage_report import TriageReporter
@@ -598,8 +403,6 @@ class Orchestrator:
             include_evidence=report_conf.get("include_evidence", True),
         )
         await reporter.generate(self.state)
-
-    # ── Utilities ─────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict[str, Any]:
         """Return current scan statistics."""

@@ -4,19 +4,36 @@ All notable changes to HunterEngine will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-07-18
+
+### Added
+- **Hierarchical agents** — `ReconAgent`, `ActiveReconAgent`, `EnumerationAgent`, `VulnHuntAgent`
+- **Nested vuln hunters** — SSTI, request smuggling, CORS, JWT (plus existing XSS/IDOR/SSRF/auth/open redirect)
+- **`active_recon` phase** — live probing + tech fingerprint as its own pipeline stage
+- Phase aliases: `enumeration`/`enum` → crawl, `vuln`/`vuln_hunt` → ai_test
+- **httpx resolution table** in `check-tools` (pip library vs ProjectDiscovery binary)
+- Scope/live-host **seeding** so `--phase ai_test` does not exit empty when crawl was skipped
+
+### Changed
+- Version bump to **3.0.0**
+- Orchestrator runs recon/crawl/ai_test through agents instead of inline module calls
+- Hardened `tool_resolver` to ignore pip `httpx` CLIs (venv + Windows Scripts)
+- README rewritten for v3 agent architecture, flags, and AI testing
+
+### Fixed
+- `--phase ai_test` finishing immediately with no endpoints
+- ProjectDiscovery httpx colliding with the pip `httpx` console script on PATH
+
 ## [2.0.0] — 2025-07-08
 
 ### Added
-- **GUI Web Dashboard** — Real-time scan monitoring, findings browser, crawl map, and settings editor via Flask + WebSocket
-- **Auto-Crawl Browser Navigator** — Playwright-based autonomous crawler that self-navigates targets: clicks links, fills forms, intercepts XHR/fetch, and explores SPAs
-- `python main.py gui` command to launch the web dashboard
+- **Auto-Crawl Browser Navigator** — Playwright-based autonomous crawler
 - GitHub-ready project structure: README, LICENSE, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
 - `pyproject.toml` for modern Python packaging
 - GitHub Actions CI pipeline
 - Issue and PR templates
 
 ### Changed
-- Orchestrator now emits real-time events for GUI consumption
 - Crawl phase integrates auto-navigator alongside external tools
 - Updated banner to v2.0.0
 

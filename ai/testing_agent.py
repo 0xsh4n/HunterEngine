@@ -48,7 +48,10 @@ class TestingAIConfig:
     max_probes_per_agent: int = 8
     max_total_probes: int = 60
     subagents: list[str] = field(
-        default_factory=lambda: ["xss", "idor", "ssrf", "auth", "open_redirect"]
+        default_factory=lambda: [
+            "xss", "idor", "ssti", "ssrf", "auth", "open_redirect",
+            "request_smuggling", "cors", "jwt",
+        ]
     )
     min_confidence: float = 0.55
     num_ctx: int = 8192
@@ -88,7 +91,8 @@ class TestingAIConfig:
             testing_enabled = False
 
         subagents = testing.get("subagents") or [
-            "xss", "idor", "ssrf", "auth", "open_redirect"
+            "xss", "idor", "ssti", "ssrf", "auth", "open_redirect",
+            "request_smuggling", "cors", "jwt",
         ]
 
         return cls(
@@ -156,22 +160,93 @@ class TestingAgent:
         self._sem = asyncio.Semaphore(max(1, config.concurrency))
         self._probe_sem = asyncio.Semaphore(max(1, config.concurrency))
 
+    @staticmethod
+    def seed_targets_from_scope(scan_state: Any, scope_loader: Any = None) -> int:
+        """
+        When ``--phase ai_test`` runs alone, endpoints are empty.
+
+        Seed from live_hosts, historical URLs, and in-scope root domains so
+        nested hunters still have something to plan against.
+        """
+        existing = list(getattr(scan_state, "endpoints", []) or [])
+        if existing:
+            return 0
+
+        seeded: list[dict] = []
+        seen: set[str] = set()
+
+        def add(url: str, source: str, method: str = "GET") -> None:
+            url = (url or "").strip()
+            if not url:
+                return
+            if not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
+            if scope_loader and not scope_loader.is_in_scope(url):
+                return
+            key = f"{method}:{url}"
+            if key in seen:
+                return
+            seen.add(key)
+            seeded.append({
+                "url": url,
+                "method": method,
+                "source": source,
+                "status": 0,
+            })
+
+        for host in getattr(scan_state, "live_hosts", []) or []:
+            add(host.get("url", ""), "seed_live_host")
+
+        for url in (getattr(scan_state, "historical_urls", []) or [])[:80]:
+            add(url, "seed_historical")
+
+        if scope_loader:
+            for domain in scope_loader.get_root_domains() or []:
+                clean = domain.removeprefix("*.")
+                add(clean, "seed_scope")
+                # Common API/app entry points for hunters when crawl was skipped
+                for path in ("/", "/api", "/api/v1", "/graphql", "/login", "/admin"):
+                    add(f"https://{clean}{path}", "seed_scope_path")
+
+            for url in getattr(getattr(scope_loader, "scope", None), "in_scope_urls", []) or []:
+                add(str(url), "seed_scope_url")
+
+        if not seeded:
+            return 0
+
+        scan_state.endpoints = seeded
+        return len(seeded)
+
     async def run(self, scan_state: Any) -> list[dict]:
         if not self.config.enabled:
-            logger.info("AI testing mode disabled")
+            logger.info(
+                "AI testing mode disabled — set ai.enabled=true and "
+                "ai.mode=testing|both (or ai.testing.enabled=true)"
+            )
             return []
 
         if not await self.client.available():
             logger.warning(
-                "AI testing skipped: %s unreachable at %s",
+                "AI testing skipped: %s unreachable at %s "
+                "(start Ollama and pull the testing model, e.g. `ollama pull qwen3:4b`)",
                 self.config.provider,
                 self.config.base_url,
             )
             return []
 
+        # Ensure phase-only runs have seed targets
+        seeded = self.seed_targets_from_scope(scan_state, self.scope)
+        if seeded:
+            logger.info("AI testing: seeded %d endpoint(s) for empty scan state", seeded)
+
         targets = self._select_targets(scan_state)
         if not targets:
-            logger.info("AI testing skipped: no interesting endpoints")
+            logger.warning(
+                "AI testing skipped: no interesting endpoints. "
+                "Run recon/crawl first, or ensure scope.yaml has in-scope domains. "
+                "Example: python main.py scan  (full pipeline) "
+                "or python main.py scan --phase crawl && python main.py scan --phase ai_test"
+            )
             return []
 
         logger.info(
@@ -216,6 +291,9 @@ class TestingAgent:
             query_keys = list(parse_qs(parsed.query).keys())
             mined = list(params_map.get(url, []) or [])[:12]
             score = self._interest_score(url, method, query_keys + mined, ep)
+            # Keep scope-seeded targets even without params (phase-only ai_test)
+            if score <= 0 and str(ep.get("source", "")).startswith("seed_"):
+                score = 0.5
             if score <= 0:
                 continue
             scored.append((score, {
@@ -316,7 +394,7 @@ class TestingAgent:
     def _targets_for_agent(self, agent: str, targets: list[dict]) -> list[dict]:
         """Cheap heuristic pre-filter so the 4B model sees relevant rows only."""
         if agent == "xss":
-            return [t for t in targets if t.get("params") or "?" in t["url"]][:20]
+            return [t for t in targets if t.get("params") or "?" in t["url"]][:20] or targets[:12]
         if agent == "idor":
             id_like = re.compile(r"(^|_)(id|uuid|user|account|order|file)(_|$)", re.I)
             return [
@@ -324,6 +402,16 @@ class TestingAgent:
                 if any(id_like.search(p) for p in t.get("params", []))
                 or re.search(r"/\d+(/|$)", t["url"])
             ][:20] or targets[:12]
+        if agent == "ssti":
+            keys = {
+                "template", "tpl", "view", "page", "name", "message", "email",
+                "subject", "body", "preview", "render", "format", "layout", "theme", "q",
+            }
+            return [
+                t for t in targets
+                if any(p.lower() in keys for p in t.get("params", []))
+                or any(x in t["url"].lower() for x in ("/render", "/preview", "/template", "/email"))
+            ][:15] or targets[:10]
         if agent == "ssrf":
             keys = {"url", "uri", "path", "dest", "destination", "webhook", "callback",
                     "link", "fetch", "proxy", "image", "src", "host", "redirect"}
@@ -346,6 +434,23 @@ class TestingAgent:
                 t for t in targets
                 if any(p.lower() in keys for p in t.get("params", []))
             ][:15] or targets[:8]
+        if agent in ("request_smuggling", "smuggling"):
+            return [
+                t for t in targets
+                if any(x in t["url"].lower() for x in ("/api/", "/gateway", "/v1/", "/v2/", "/proxy"))
+            ][:15] or targets[:10]
+        if agent == "cors":
+            return [
+                t for t in targets
+                if any(x in t["url"].lower() for x in ("/api/", "/graphql", "/auth", "/user", "/account"))
+            ][:15] or targets[:10]
+        if agent == "jwt":
+            return [
+                t for t in targets
+                if any(x in t["url"].lower() for x in (
+                    "/api/", "/auth", "/login", "/token", "/oauth", "/session", "/jwt",
+                ))
+            ][:15] or targets[:10]
         return targets[:20]
 
     def _merge_probes(self, plans: list[ProbePlan]) -> list[PlannedProbe]:
@@ -510,7 +615,9 @@ class TestingAgent:
                     f"({len(body)} bytes)."
                 )
 
-        elif check in ("status_diff", "error_leak") or probe.vuln_class in ("idor", "ssrf"):
+        elif check in ("status_diff", "error_leak") or probe.vuln_class in (
+            "idor", "ssrf", "ssti", "request_smuggling", "smuggling", "cors", "jwt",
+        ):
             if check == "error_leak" or probe.vuln_class == "ssrf":
                 leak_markers = (
                     "connection refused", "failed to connect", "timeout",
@@ -534,6 +641,47 @@ class TestingAgent:
                         f"IDOR candidate: object-like 200 response after ID swap "
                         f"({probe.parameter}={probe.payload})."
                     )
+            if probe.vuln_class == "ssti":
+                # Math canary evaluation e.g. {{7*7}} → 49
+                if "49" in body and any(
+                    m in (probe.payload or "") for m in ("7*7", "7 * 7")
+                ):
+                    hit = True
+                    confidence = 0.78
+                    severity = Severity.HIGH
+                    evidence = "SSTI canary evaluated (49) in response body."
+                elif any(
+                    m in body.lower()
+                    for m in ("jinja", "freemarker", "twig", "velocity", "templateerror", "templating")
+                ):
+                    hit = True
+                    confidence = 0.62
+                    severity = Severity.MEDIUM
+                    evidence = "Template engine error/leak indicators in response."
+            if probe.vuln_class in ("request_smuggling", "smuggling"):
+                # Soft differential: unusual 4xx/timeout-style bodies after TE/CL canaries
+                if resp.status_code in (400, 408, 411, 413, 502, 503) or "bad request" in body.lower():
+                    hit = True
+                    confidence = 0.55
+                    severity = Severity.MEDIUM
+                    evidence = (
+                        f"Smuggling differential: status {resp.status_code} after "
+                        f"TE/CL header canary."
+                    )
+            if probe.vuln_class == "cors":
+                acao = resp.headers.get("access-control-allow-origin", "")
+                acac = resp.headers.get("access-control-allow-credentials", "")
+                if acao and ("evil.example" in acao.lower() or acao == "*"):
+                    hit = True
+                    confidence = 0.75 if acac.lower() == "true" else 0.65
+                    severity = Severity.HIGH if acac.lower() == "true" else Severity.MEDIUM
+                    evidence = f"CORS reflection: ACAO={acao!r} ACAC={acac!r}."
+            if probe.vuln_class == "jwt" and check == "auth_bypass":
+                if resp.status_code == 200 and _looks_sensitive(body, request_url):
+                    hit = True
+                    confidence = 0.6
+                    severity = Severity.HIGH
+                    evidence = "JWT/auth probe returned sensitive-looking 200 response."
 
         if not hit:
             return None
