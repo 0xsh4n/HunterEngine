@@ -286,6 +286,20 @@ class TestingAgent:
         await self._control_gate("ai_test:execute")
         findings = await self._execute_probes(probes)
 
+    async def _control_gate(self, label: str) -> None:
+        """Cooperative pause/quit controller used by the testing agent."""
+        ctrl = getattr(self, "controller", None)
+        if not ctrl:
+            return
+        from core.orchestrator import ScanStopped
+        from core.scan_control import ControlAction
+
+        action = await ctrl.checkpoint(label)
+        if action == ControlAction.QUIT:
+            raise ScanStopped("quit", message=f"Quit during {label}")
+        if action == ControlAction.ABORT:
+            raise ScanStopped("abort", message=f"Abort during {label}")
+
         setattr(scan_state, "ai_test_probes", len(probes))
         setattr(scan_state, "ai_test_findings", len(findings))
         logger.info("AI bug hunter produced %d finding(s)", len(findings))
