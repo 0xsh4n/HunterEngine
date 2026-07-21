@@ -30,6 +30,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import typer
 from rich.console import Console
@@ -211,6 +212,14 @@ def scan(
                 console.print(f"\n[red]Scan aborted after {elapsed:.0f}s (not saved).[/red]\n")
             print_results(orchestrator.state, elapsed)
             raise typer.Exit(0 if stop.action == "quit" else 130)
+        except Exception as exc:
+            elapsed = time.time() - start
+            console.print(f"\n[red]Scan failed unexpectedly: {exc}[/red]\n")
+            if verbose:
+                logger = logging.getLogger("hunterengine")
+                logger.exception("Scan pipeline crashed")
+            print_results(getattr(orchestrator, "state", None), elapsed)
+            raise typer.Exit(1) from exc
 
         elapsed = time.time() - start
         print_results(state, elapsed)
@@ -530,68 +539,95 @@ def check_tools() -> None:
 # ── Output helpers ────────────────────────────────────────────────────────
 
 
+def _safe_len(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value)
+    return 1 if value else 0
+
+
+def _safe_text(value: object, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
 def print_results(state, elapsed: float) -> None:
     """Print a rich dashboard of scan results."""
-    console.print(f"\n[bold cyan]═══ Scan Complete ({elapsed:.0f}s) ═══[/bold cyan]\n")
+    try:
+        state_obj = state or SimpleNamespace()
+        findings = state_obj.findings if isinstance(getattr(state_obj, "findings", None), list) else []
+        errors = getattr(state_obj, "errors", None) or []
+        if not isinstance(errors, list):
+            errors = [errors]
 
-    # Stats panel
-    stats_table = Table(show_header=False, box=None)
-    stats_table.add_column("Metric", style="dim")
-    stats_table.add_column("Value", style="bold")
-    stats_table.add_row("Subdomains discovered", str(len(state.subdomains)))
-    stats_table.add_row("Live hosts", str(len(state.live_hosts)))
-    stats_table.add_row("Endpoints crawled", str(len(state.endpoints)))
-    stats_table.add_row("JS files analyzed", str(len(state.js_files)))
-    stats_table.add_row("Total findings", str(len(state.findings)))
-    stats_table.add_row("Weak signals", str(len(state.weak_signals)))
-    stats_table.add_row("Chained findings", str(len(state.chained_findings)))
-    stats_table.add_row("AI enriched findings", str(getattr(state, "ai_enriched_findings", 0)))
-    stats_table.add_row("AI test probes", str(getattr(state, "ai_test_probes", 0)))
-    stats_table.add_row("AI test findings", str(getattr(state, "ai_test_findings", 0)))
-    stats_table.add_row("Errors", str(len(state.errors)))
-    console.print(Panel(stats_table, title="Scan Statistics", border_style="green"))
+        console.print(f"\n[bold cyan]═══ Scan Complete ({elapsed:.0f}s) ═══[/bold cyan]\n")
 
-    # Findings table
-    if state.findings:
-        findings_table = Table(title=f"Findings ({len(state.findings)} total)")
-        findings_table.add_column("#", style="dim", width=4)
-        findings_table.add_column("Sev", width=8)
-        findings_table.add_column("Conf", width=6)
-        findings_table.add_column("Title", style="white")
-        findings_table.add_column("Detector", style="dim")
-        findings_table.add_column("URL", style="cyan", max_width=50)
+        stats_table = Table(show_header=False, box=None)
+        stats_table.add_column("Metric", style="dim")
+        stats_table.add_column("Value", style="bold")
+        stats_table.add_row("Subdomains discovered", str(_safe_len(getattr(state_obj, "subdomains", None))))
+        stats_table.add_row("Live hosts", str(_safe_len(getattr(state_obj, "live_hosts", None))))
+        stats_table.add_row("Endpoints crawled", str(_safe_len(getattr(state_obj, "endpoints", None))))
+        stats_table.add_row("JS files analyzed", str(_safe_len(getattr(state_obj, "js_files", None))))
+        stats_table.add_row("Total findings", str(len(findings)))
+        stats_table.add_row("Weak signals", str(_safe_len(getattr(state_obj, "weak_signals", None))))
+        stats_table.add_row("Chained findings", str(_safe_len(getattr(state_obj, "chained_findings", None))))
+        stats_table.add_row("AI enriched findings", str(getattr(state_obj, "ai_enriched_findings", 0)))
+        stats_table.add_row("AI test probes", str(getattr(state_obj, "ai_test_probes", 0)))
+        stats_table.add_row("AI test findings", str(getattr(state_obj, "ai_test_findings", 0)))
+        stats_table.add_row("Errors", str(len(errors)))
+        console.print(Panel(stats_table, title="Scan Statistics", border_style="green"))
 
-        sev_colors = {
-            "critical": "bold red",
-            "high": "bold yellow",
-            "medium": "yellow",
-            "low": "blue",
-            "info": "dim",
-        }
+        if findings:
+            findings_table = Table(title=f"Findings ({len(findings)} total)")
+            findings_table.add_column("#", style="dim", width=4)
+            findings_table.add_column("Sev", width=8)
+            findings_table.add_column("Conf", width=6)
+            findings_table.add_column("Title", style="white")
+            findings_table.add_column("Detector", style="dim")
+            findings_table.add_column("URL", style="cyan", max_width=50)
 
-        for i, f in enumerate(state.findings[:50], 1):
-            sev = f.get("severity", "info")
-            sev_style = sev_colors.get(sev, "dim")
-            conf = f"{f.get('confidence', 0):.0%}"
-            url = f.get("url", "")[:50]
-            findings_table.add_row(
-                str(i),
-                f"[{sev_style}]{sev.upper()}[/{sev_style}]",
-                conf,
-                f.get("title", "")[:60],
-                f.get("detector", ""),
-                url,
-            )
+            sev_colors = {
+                "critical": "bold red",
+                "high": "bold yellow",
+                "medium": "yellow",
+                "low": "blue",
+                "info": "dim",
+            }
 
-        console.print(findings_table)
-    else:
-        console.print("[yellow]No findings detected.[/yellow]")
+            for i, finding in enumerate(findings[:50], 1):
+                if not isinstance(finding, dict):
+                    continue
+                sev = _safe_text(finding.get("severity", "info")).lower() or "info"
+                sev_style = sev_colors.get(sev, "dim")
+                conf_value = finding.get("confidence", 0)
+                try:
+                    conf = f"{float(conf_value):.0%}"
+                except (TypeError, ValueError):
+                    conf = "0%"
+                url = _safe_text(finding.get("url", ""))[:50]
+                findings_table.add_row(
+                    str(i),
+                    f"[{sev_style}]{sev.upper()}[/{sev_style}]",
+                    conf,
+                    _safe_text(finding.get("title", ""))[:60],
+                    _safe_text(finding.get("detector", "")),
+                    url,
+                )
 
-    # Errors
-    if state.errors:
-        console.print(f"\n[red]Errors ({len(state.errors)}):[/red]")
-        for err in state.errors:
-            console.print(f"  [red]•[/red] {err}")
+            console.print(findings_table)
+        else:
+            console.print("[yellow]No findings detected.[/yellow]")
+
+        if errors:
+            console.print(f"\n[red]Errors ({len(errors)}):[/red]")
+            for err in errors:
+                console.print(f"  [red]•[/red] {_safe_text(err, 'Unknown error')}")
+    except Exception as exc:
+        console.print(f"[yellow]Result summary could not be rendered: {exc}[/yellow]")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────

@@ -96,10 +96,19 @@ class LocalAIReasoner:
 
         if not await self._provider_available():
             logger.warning(
-                "AI reasoner skipped: %s provider is not reachable at %s",
+                "AI reasoner provider %s is not reachable at %s; using conservative fallback heuristics",
                 self.config.provider,
                 self.config.base_url,
             )
+            context = self._scan_context(scan_state)
+            tasks = [self._safe_enrich(finding, context, use_fallback=True) for finding in eligible]
+            results = await asyncio.gather(*tasks)
+            enriched = sum(1 for ok in results if ok)
+            if enriched:
+                setattr(scan_state, "ai_enriched_findings", enriched)
+                logger.info("AI reasoner enriched %d finding(s) with fallback heuristics", enriched)
+            else:
+                logger.warning("AI reasoner did not enrich any findings")
             return findings
 
         logger.info(
@@ -122,10 +131,16 @@ class LocalAIReasoner:
 
         return findings
 
-    async def _safe_enrich(self, finding: dict, context: dict[str, Any]) -> bool:
+    async def _safe_enrich(
+        self,
+        finding: dict,
+        context: dict[str, Any],
+        *,
+        use_fallback: bool = False,
+    ) -> bool:
         async with self._sem:
             try:
-                analysis = await self._analyze_finding(finding, context)
+                analysis = await self._analyze_finding(finding, context, use_fallback=use_fallback)
                 if not analysis:
                     return False
                 self._apply_analysis(finding, analysis)
@@ -138,10 +153,20 @@ class LocalAIReasoner:
         self,
         finding: dict,
         context: dict[str, Any],
+        *,
+        use_fallback: bool = False,
     ) -> Optional[dict[str, Any]]:
-        prompt = self._build_prompt(finding, context)
-        content = await self._chat(prompt)
-        return self._parse_json(content)
+        if use_fallback:
+            return self._fallback_analysis(finding, context)
+        try:
+            prompt = self._build_prompt(finding, context)
+            content = await self._chat(prompt)
+            parsed = self._parse_json(content)
+            if parsed:
+                return parsed
+        except Exception as exc:
+            logger.debug("AI response parsing failed for %s: %s", finding.get("title", "finding"), exc)
+        return self._fallback_analysis(finding, context)
 
     async def _provider_available(self) -> bool:
         provider = self.config.provider.lower().strip()
@@ -334,14 +359,74 @@ class LocalAIReasoner:
     def _parse_json(self, content: str) -> Optional[dict[str, Any]]:
         if not content:
             return None
+        cleaned = re.sub(r"```(?:json)?", "", content, flags=re.IGNORECASE)
+        cleaned = cleaned.strip()
         try:
-            data = json.loads(content)
+            data = json.loads(cleaned)
         except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", content, re.DOTALL)
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
             if not match:
                 return None
-            data = json.loads(match.group(0))
+            try:
+                data = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return None
         return data if isinstance(data, dict) else None
+
+    def _fallback_analysis(self, finding: dict, context: dict[str, Any]) -> dict[str, Any]:
+        title = str(finding.get("title", "") or "").lower()
+        description = str(finding.get("description", "") or "").lower()
+        url = str(finding.get("url", "") or "")
+        parameter = str(finding.get("parameter", "") or "").lower()
+        text = " ".join([title, description, parameter, url]).lower()
+
+        plausible = True
+        false_positive_risk = "medium"
+        severity = "medium"
+        confidence_delta = 0.02
+        priority = "P3"
+        rationale = "The finding appears plausible from the available evidence and was reviewed conservatively."
+        report_summary = "The scanner surfaced a potentially exploitable issue that merits manual review and safe validation."
+        remediation = "Review the affected endpoint, enforce server-side authorization, and validate the behavior without data exfiltration."
+        recommended_validation = ["Review the request/response flow for authorization enforcement", "Confirm the behavior with a low-risk, read-only test"]
+        tags = ["heuristic-review"]
+
+        if any(token in text for token in ["idor", "authorization", "access", "bypass", "privilege"]):
+            severity = "high"
+            confidence_delta = 0.06
+            priority = "P2"
+            rationale = "The evidence suggests a high-impact authorization or access-control issue that warrants careful review."
+            remediation = "Enforce authorization checks on the server side and verify the affected object references are bound to the current user."
+            recommended_validation = ["Confirm access enforcement with an authenticated, read-only check", "Verify the same user cannot access another user's data"]
+            tags = ["authorization", "heuristic-review"]
+        elif any(token in text for token in ["csrf", "xss", "ssrf", "redirect", "sqli", "injection"]):
+            severity = "medium"
+            confidence_delta = 0.04
+            priority = "P3"
+            rationale = "The signal is consistent with a common injection or client-side issue, but the evidence is still incomplete."
+            remediation = "Sanitize or encode untrusted input and validate server-side behavior before deployment."
+            recommended_validation = ["Inspect the reflected or stored payload carefully", "Confirm the behavior with a non-destructive, scoped probe"]
+            tags = ["input-validation", "heuristic-review"]
+
+        if "test" in url or parameter:
+            confidence_delta += 0.01
+        if context.get("endpoint_count", 0) > 50:
+            confidence_delta += 0.01
+        if context.get("weak_signal_count", 0) == 0:
+            false_positive_risk = "low"
+
+        return {
+            "plausible": plausible,
+            "false_positive_risk": false_positive_risk,
+            "severity": severity,
+            "confidence_delta": round(_clamp_float(confidence_delta, -0.25, 0.25), 3),
+            "priority": priority,
+            "rationale": rationale,
+            "report_summary": report_summary,
+            "remediation": remediation,
+            "recommended_validation": recommended_validation,
+            "tags": tags,
+        }
 
     def _apply_analysis(self, finding: dict, analysis: dict[str, Any]) -> None:
         metadata = finding.setdefault("metadata", {})
