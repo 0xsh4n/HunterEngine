@@ -403,9 +403,14 @@ class Orchestrator:
                 except ScanStopped:
                     raise
                 except Exception as e:
+                    import traceback
+                    tb = traceback.format_exc()
                     logger.error(f"Phase {phase.value} failed: {e}")
+                    logger.debug(tb)
+                    # Record full traceback in state errors for diagnostics
                     self.state.errors.append(f"{phase.value}: {str(e)}")
-                    self.state.phase_health[phase.value] = {"status": "failed", "error": str(e)[:300]}
+                    self.state.errors.append(tb)
+                    self.state.phase_health[phase.value] = {"status": "failed", "error": str(e)[:300], "traceback": tb[:4000]}
                     self._save_checkpoint("error", next_phase=phase.value)
                     # Continue by default: partial results are more useful than
                     # a crash. Strict mode can retain fail-fast behavior.
