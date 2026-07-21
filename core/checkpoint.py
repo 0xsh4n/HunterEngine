@@ -69,6 +69,8 @@ def serialize_state(state: Any) -> dict[str, Any]:
         "ai_test_findings": int(getattr(state, "ai_test_findings", 0) or 0),
         "total_requests": int(getattr(state, "total_requests", 0) or 0),
         "errors": list(getattr(state, "errors", []) or []),
+        "agentic_decisions": list(getattr(state, "agentic_decisions", []) or []),
+        "phase_health": dict(getattr(state, "phase_health", {}) or {}),
     }
 
 
@@ -172,6 +174,8 @@ class CheckpointStore:
         state.ai_test_findings = int(blob.get("ai_test_findings") or 0)
         state.total_requests = int(blob.get("total_requests") or 0)
         state.errors = list(blob.get("errors") or [])
+        state.agentic_decisions = list(blob.get("agentic_decisions") or [])
+        state.phase_health = dict(blob.get("phase_health") or {})
         state.start_time = float(blob.get("start_time") or time.time())
 
         phase_str = blob.get("phase") or checkpoint.get("next_phase") or "init"

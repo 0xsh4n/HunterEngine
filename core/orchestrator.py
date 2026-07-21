@@ -93,6 +93,9 @@ class ScanState:
     # Stats
     total_requests: int = 0
     errors: list[str] = field(default_factory=list)
+    # Explainable autonomous planning/health telemetry
+    agentic_decisions: list[dict] = field(default_factory=list)
+    phase_health: dict[str, dict] = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -112,6 +115,7 @@ class Orchestrator:
         skip_enum: bool = False,
         controller: Optional[ScanController] = None,
         checkpoint_dir: Optional[str] = None,
+        profile: Optional[str] = None,
     ) -> None:
         self.scope_path = scope_path
         self.settings_path = settings_path
@@ -120,6 +124,7 @@ class Orchestrator:
         self.auto_crawl = auto_crawl
         self.headed = headed
         self.skip_enum = skip_enum
+        self.profile = (profile or "").lower().strip() or None
 
         self.scope_loader: Optional[ScopeLoader] = None
         self.rate_limiter: Optional[RateLimiter] = None
@@ -127,6 +132,7 @@ class Orchestrator:
         self.session_mgr: Optional[SessionManager] = None
         self.browser: Optional[BrowserEngine] = None
         self.proxy: Optional[ProxyEngine] = None
+        self.knowledge_base = None
         self._proxy_host = "127.0.0.1"
         self._proxy_port = 8080
         self._proxy_enabled = False
@@ -162,7 +168,7 @@ class Orchestrator:
             proxy_enabled=self._proxy_enabled,
             proxy_host=self._proxy_host,
             proxy_port=self._proxy_port,
-            extras={"controller": self.controller},
+            extras={"controller": self.controller, "profile": self.profile or "blackbox", "knowledge_base": self.knowledge_base},
         )
 
     def load_checkpoint(self, path: Optional[str] = None) -> bool:
@@ -248,6 +254,22 @@ class Orchestrator:
     async def setup(self) -> None:
         """Initialize all subsystems from config."""
         self.load_settings()
+        # CLI profile overrides config, while unknown values safely fall back.
+        configured_profile = str((self.settings.get("testing", {}) or {}).get("profile", "blackbox")).lower()
+        self.profile = self.profile if self.profile in {"blackbox", "greybox"} else configured_profile
+        if self.profile not in {"blackbox", "greybox"}:
+            self.profile = "blackbox"
+        self.settings.setdefault("safety", {}).setdefault("active_testing", {})["profile"] = self.profile
+        try:
+            from knowledge.rag import KnowledgeBase
+            kb_conf = self.settings.get("knowledge", {}) or {}
+            if kb_conf.get("enabled", True):
+                self.knowledge_base = KnowledgeBase(kb_conf.get("index_path", "data/knowledge/index.json"),
+                    chunk_size=kb_conf.get("chunk_size", 1200), overlap=kb_conf.get("chunk_overlap", 180))
+                self.knowledge_base.load()
+                logger.info("Knowledge RAG loaded: %d chunks", len(self.knowledge_base.chunks))
+        except Exception as exc:
+            logger.warning("Knowledge RAG unavailable; continuing without it: %s", exc)
 
         self.scope_loader = ScopeLoader(self.scope_path)
         self.scope_loader.load()
@@ -383,9 +405,15 @@ class Orchestrator:
                 except Exception as e:
                     logger.error(f"Phase {phase.value} failed: {e}")
                     self.state.errors.append(f"{phase.value}: {str(e)}")
+                    self.state.phase_health[phase.value] = {"status": "failed", "error": str(e)[:300]}
                     self._save_checkpoint("error", next_phase=phase.value)
-                    if phase in (ScanPhase.RECON, ScanPhase.ACTIVE_RECON):
+                    # Continue by default: partial results are more useful than
+                    # a crash. Strict mode can retain fail-fast behavior.
+                    strict = bool((self.settings.get("general", {}) or {}).get("strict_failures", False))
+                    if strict and phase in (ScanPhase.RECON, ScanPhase.ACTIVE_RECON):
                         raise
+                else:
+                    self.state.phase_health[phase.value] = {"status": "ok", "elapsed": round(time.time() - phase_start, 2)}
 
                 elapsed = time.time() - phase_start
                 logger.info(f"═══ Phase {phase.value} completed in {elapsed:.1f}s ═══")
@@ -453,6 +481,9 @@ class Orchestrator:
     async def _run_ai_test(self) -> None:
         """Vuln hunt agent: nested IDOR / SSTI / smuggling / XSS / … hunters."""
         from ai.agents import VulnHuntAgent
+        from ai.agentic import AgenticPlanner
+
+        AgenticPlanner(self.profile or "blackbox").apply(self.state)
 
         await VulnHuntAgent(self._agent_context()).run(self.state)
 
@@ -540,6 +571,10 @@ class Orchestrator:
             output_dir=report_conf.get("output_dir", "data/reports"),
             formats=report_conf.get("format", ["markdown"]),
             include_evidence=report_conf.get("include_evidence", True),
+            evidence_dirs=report_conf.get("evidence_dirs", [
+                "data/screenshots", "data/eyewitness", "data/gowitness",
+            ]),
+            scope_name=getattr(getattr(self.scope_loader, "scope", None), "program_name", ""),
         )
         await reporter.generate(self.state)
 
@@ -559,5 +594,8 @@ class Orchestrator:
             "ai_test_probes": self.state.ai_test_probes,
             "ai_test_findings": self.state.ai_test_findings,
             "errors": len(self.state.errors),
+            "profile": self.profile or "blackbox",
+            "agentic_decisions": len(self.state.agentic_decisions),
+            "phase_health": self.state.phase_health,
             "rate_limiter": self.rate_limiter.get_stats() if self.rate_limiter else {},
         }

@@ -88,7 +88,7 @@ class HunterSubagent(ABC):
                 "probes": [
                     {
                         "url": "full URL",
-                        "method": "GET|POST|PUT|PATCH|DELETE",
+                        "method": "GET|HEAD|OPTIONS",
                         "parameter": "param name or empty",
                         "payload": "safe canary / test value",
                         "location": "query|body|header|path",
@@ -102,7 +102,7 @@ class HunterSubagent(ABC):
                 "notes": "optional short note",
             },
             "rules": [
-                "Only target URLs from the provided list.",
+                "Only target URLs from the provided list, copied exactly.",
                 "Prefer parameterized endpoints and auth-sensitive paths.",
                 "Payloads must be non-destructive canaries — no exploit chains, no DoS, no brute force.",
                 "Skip static assets (.js/.css/.png/.svg/.woff).",

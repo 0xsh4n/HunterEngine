@@ -22,7 +22,9 @@ from ai.subagents import SUBAGENT_REGISTRY, HunterSubagent, PlannedProbe, ProbeP
 from core.rate_limiter import RateLimiter
 from core.scope_loader import ScopeLoader
 from core.waf_bypass import WAFBypass
+from core.safety import ExecutionGuard, SafetyConfig
 from detection.base_detector import Severity
+from knowledge.rag import KnowledgeBase
 
 logger = logging.getLogger("hunterengine.ai.testing_agent")
 
@@ -58,6 +60,8 @@ class TestingAIConfig:
     num_predict: int = 1536
     api_key_env: str = ""
     extra_headers: dict[str, str] = field(default_factory=dict)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+    profile: str = "blackbox"
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "TestingAIConfig":
@@ -95,6 +99,7 @@ class TestingAIConfig:
             "request_smuggling", "cors", "jwt",
         ]
 
+        safety = SafetyConfig.from_settings(settings)
         return cls(
             enabled=testing_enabled,
             provider=client_cfg.provider,
@@ -113,6 +118,8 @@ class TestingAIConfig:
             num_predict=client_cfg.num_predict,
             api_key_env=client_cfg.api_key_env,
             extra_headers=client_cfg.extra_headers,
+            safety=safety,
+            profile=safety.profile,
         )
 
     def to_client_config(self) -> OllamaClientConfig:
@@ -152,15 +159,19 @@ class TestingAgent:
         waf_bypass: Optional[WAFBypass] = None,
         scope_loader: Optional[ScopeLoader] = None,
         controller: Any = None,
+        knowledge_base: Optional[KnowledgeBase] = None,
     ) -> None:
         self.config = config
         self.rate_limiter = rate_limiter
         self.waf_bypass = waf_bypass
         self.scope = scope_loader
         self.controller = controller
+        self.knowledge_base = knowledge_base
         self.client = OllamaClient(config.to_client_config())
         self._sem = asyncio.Semaphore(max(1, config.concurrency))
         self._probe_sem = asyncio.Semaphore(max(1, config.concurrency))
+        self.guard = ExecutionGuard(config.safety)
+        self._target_urls: set[str] = set()
 
     @staticmethod
     def seed_targets_from_scope(scan_state: Any, scope_loader: Any = None) -> int:
@@ -242,6 +253,9 @@ class TestingAgent:
             logger.info("AI testing: seeded %d endpoint(s) for empty scan state", seeded)
 
         targets = self._select_targets(scan_state)
+        # Planners may only choose discovered or explicitly configured targets;
+        # an in-scope URL invented by a model is not enough to execute.
+        self._target_urls = {str(target["url"]) for target in targets}
         if not targets:
             logger.warning(
                 "AI testing skipped: no interesting endpoints. "
@@ -367,7 +381,16 @@ class TestingAgent:
             "endpoint_count": len(getattr(scan_state, "endpoints", []) or []),
             "tech": tech_summary,
             "graphql": (getattr(scan_state, "graphql_schemas", []) or [])[:5],
+            "knowledge": self._knowledge_context(scan_state),
         }
+
+    def _knowledge_context(self, scan_state: Any) -> list[dict]:
+        if not self.knowledge_base:
+            return []
+        endpoints = getattr(scan_state, "endpoints", []) or []
+        query = " ".join([str(e.get("url", "")) for e in endpoints[:8]])
+        query += " authorized application security testing " + " ".join((getattr(scan_state, "tech_stack", {}) or {}).keys())
+        return self.knowledge_base.context(query, top_k=4, max_chars=5000)
 
     # ── Subagents ─────────────────────────────────────────────────────────
 
@@ -393,7 +416,15 @@ class TestingAgent:
                 focused = self._targets_for_agent(agent.name, targets)
                 return await agent.plan(focused, context)
 
-        return list(await asyncio.gather(*[run_one(a) for a in agents]))
+        # One sick specialist must not take down the whole hunt.
+        results = await asyncio.gather(*[run_one(a) for a in agents], return_exceptions=True)
+        plans: list[ProbePlan] = []
+        for agent, result in zip(agents, results):
+            if isinstance(result, Exception):
+                logger.warning("%s specialist isolated after failure: %s", agent.name, result)
+                continue
+            plans.append(result)
+        return plans
 
     def _targets_for_agent(self, agent: str, targets: list[dict]) -> list[dict]:
         """Cheap heuristic pre-filter so the 4B model sees relevant rows only."""
@@ -464,6 +495,13 @@ class TestingAgent:
             for probe in plan.probes:
                 if self.scope and not self.scope.is_in_scope(probe.url):
                     continue
+                if probe.url not in self._target_urls:
+                    logger.debug("Discarded model-invented target: %s", probe.url)
+                    continue
+                allowed, reason = self.guard.allow(probe.method, probe.url)
+                if not allowed:
+                    logger.debug("Discarded probe: %s", reason)
+                    continue
                 key = f"{probe.method}:{probe.url}:{probe.parameter}:{probe.payload}:{probe.check}"
                 if key in seen:
                     continue
@@ -477,8 +515,8 @@ class TestingAgent:
 
     async def _execute_probes(self, probes: list[PlannedProbe]) -> list[dict]:
         tasks = [self._safe_execute(p) for p in probes]
-        results = await asyncio.gather(*tasks)
-        return [f for f in results if f]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [f for f in results if isinstance(f, dict) and f]
 
     async def _safe_execute(self, probe: PlannedProbe) -> Optional[dict]:
         async with self._probe_sem:
@@ -492,12 +530,20 @@ class TestingAgent:
         if self.scope and not self.scope.is_in_scope(probe.url):
             return None
 
+        allowed, reason = self.guard.allow(probe.method, probe.url)
+        if not allowed:
+            logger.info("Safety gate skipped %s %s: %s", probe.method, probe.url, reason)
+            return None
+
         request_url, headers, data, json_body, params = self._build_request(probe)
         host = urlparse(request_url).hostname or ""
         if self.rate_limiter:
             await self.rate_limiter.acquire(host)
+        self.guard.record_request(request_url)
 
         merged_headers: dict[str, str] = {}
+        if self.config.safety.allow_authenticated_requests and self.scope:
+            merged_headers.update(self.scope.get_auth_headers())
         if self.waf_bypass:
             merged_headers.update(self.waf_bypass.get_headers(host))
         merged_headers.update(headers)
@@ -506,7 +552,7 @@ class TestingAgent:
             async with httpx.AsyncClient(
                 verify=False,
                 follow_redirects=False,
-                timeout=12.0,
+                timeout=min(12.0, self.config.safety.max_request_seconds),
             ) as client:
                 resp = await client.request(
                     method=probe.method,
@@ -518,7 +564,13 @@ class TestingAgent:
                 )
                 if self.rate_limiter:
                     self.rate_limiter.report_response(host, resp.status_code)
-        except Exception:
+                self.guard.record_response(request_url, resp.status_code)
+                content_length = int(resp.headers.get("content-length", "0") or 0)
+                if content_length > self.config.safety.max_response_bytes:
+                    logger.info("Safety gate skipped oversized response from %s", host)
+                    return None
+        except Exception as exc:
+            self.guard.record_failure(request_url, str(exc))
             return None
 
         return self._evaluate(probe, resp, request_url)

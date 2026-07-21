@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -29,12 +31,17 @@ class TriageReporter:
         formats: Optional[list[str]] = None,
         include_evidence: bool = True,
         template_dir: str = "reporting/templates",
+        evidence_dirs: Optional[list[str]] = None,
+        scope_name: str = "",
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.formats = formats or ["markdown"]
         self.include_evidence = include_evidence
         self.scorer = ConfidenceScorer()
+        self.evidence_dirs = [Path(p) for p in (evidence_dirs or ["data/screenshots", "data/eyewitness", "data/gowitness"])]
+        self.scope_dir = self.output_dir
+        self.configured_scope_name = scope_name
 
         # Jinja2 environment
         tmpl_path = Path(template_dir)
@@ -54,6 +61,9 @@ class TriageReporter:
         """
         outputs: dict[str, Path] = {}
         timestamp = time.strftime("%Y%m%d_%H%M%S")
+        scope_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", self.configured_scope_name).strip("._") if self.configured_scope_name else self._scope_name(scan_state)
+        self.scope_dir = self.output_dir / scope_name
+        self.scope_dir.mkdir(parents=True, exist_ok=True)
 
         # Sort findings by severity and confidence
         findings = sorted(
@@ -70,6 +80,10 @@ class TriageReporter:
         for f in findings:
             f["priority"] = self.scorer.classify_priority(f)
 
+        # Always emit one self-contained page per finding, independent of the
+        # selected export formats. This is useful for triage and evidence review.
+        finding_pages = await self._generate_finding_pages(findings, scan_state)
+
         if "markdown" in self.formats:
             path = await self._generate_markdown(findings, scan_state, timestamp)
             outputs["markdown"] = path
@@ -80,18 +94,79 @@ class TriageReporter:
 
         if "hackerone" in self.formats:
             from reporting.h1_formatter import H1Formatter
-            formatter = H1Formatter(self.output_dir)
+            formatter = H1Formatter(self.scope_dir)
             paths = await formatter.format_all(findings)
             outputs["hackerone"] = paths[0] if paths else self.output_dir
 
         if "bugcrowd" in self.formats:
             from reporting.bugcrowd_formatter import BugcrowdFormatter
-            formatter = BugcrowdFormatter(self.output_dir)
+            formatter = BugcrowdFormatter(self.scope_dir)
             paths = await formatter.format_all(findings)
             outputs["bugcrowd"] = paths[0] if paths else self.output_dir
 
         logger.info(f"Reports generated: {list(outputs.keys())}")
+        outputs["findings"] = self.scope_dir
         return outputs
+
+    @staticmethod
+    def _scope_name(scan_state: Any) -> str:
+        loader = getattr(scan_state, "scope_loader", None)
+        scope = getattr(loader, "scope", None)
+        name = getattr(scope, "program_name", "") or ""
+        if not name:
+            domains = getattr(scope, "in_scope_domains", []) or []
+            name = domains[0] if domains else "unknown-scope"
+        return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name)).strip("._") or "unknown-scope"
+
+    def _evidence_image(self, finding: dict, scan_state: Any) -> Optional[Path]:
+        candidates = []
+        for key in ("screenshot", "screenshot_path", "image", "poc_image", "evidence_image"):
+            if finding.get(key):
+                candidates.append(Path(str(finding[key])))
+        metadata = finding.get("metadata", {}) or {}
+        for key in ("screenshot", "screenshot_path", "image", "poc_image"):
+            if metadata.get(key):
+                candidates.append(Path(str(metadata[key])))
+        url = str(finding.get("url", ""))
+        host = re.sub(r"[^a-zA-Z0-9.-]", "_", url.split("//")[-1].split("/")[0])
+        for directory in self.evidence_dirs:
+            if directory.exists():
+                candidates.extend(directory.glob("*"))
+                candidates.extend(directory.rglob(f"*{host}*"))
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+                return candidate
+        return None
+
+    async def _generate_finding_pages(self, findings: list[dict], scan_state: Any) -> list[Path]:
+        pages: list[Path] = []
+        assets = self.scope_dir / "evidence"
+        assets.mkdir(exist_ok=True)
+        for index, finding in enumerate(findings, 1):
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", str(finding.get("title", "finding")).lower()).strip("-")[:70] or "finding"
+            image = self._evidence_image(finding, scan_state)
+            image_ref = ""
+            if image:
+                target = assets / f"{index:03d}_{image.name}"
+                try:
+                    if image.resolve() != target.resolve():
+                        shutil.copy2(image, target)
+                    image_ref = f"evidence/{target.name}"
+                    finding["evidence_image"] = str(target)
+                except OSError:
+                    image_ref = ""
+            esc = lambda value: __import__("html").escape(str(value or ""))
+            evidence = esc(finding.get("evidence", ""))
+            image_html = f'<img src="{image_ref}" alt="Proof of concept screenshot">' if image_ref else "<p>No Eyewitness/Gowitness screenshot found.</p>"
+            body = f"""<!doctype html><html><head><meta charset='utf-8'><title>{esc(finding.get('title','Finding'))}</title>
+<style>body{{font:16px system-ui;max-width:1000px;margin:2rem auto;padding:0 1rem}}pre{{background:#f4f4f4;padding:1rem;white-space:pre-wrap}}img{{max-width:100%;border:1px solid #ddd}}.meta{{background:#f7f7f7;padding:1rem}}</style></head><body>
+<h1>{esc(finding.get('title','Untitled'))}</h1><div class='meta'><b>Severity:</b> {esc(finding.get('severity','info'))} · <b>Confidence:</b> {float(finding.get('confidence',0)):.0%}<br><b>URL:</b> {esc(finding.get('url',''))}</div>
+<h2>Description</h2><p>{esc(finding.get('description',''))}</p><h2>Evidence</h2><pre>{evidence}</pre><h2>Proof of concept image</h2>{image_html}
+<h2>Impact</h2><p>{esc(finding.get('impact',''))}</p><h2>Remediation</h2><p>{esc(finding.get('remediation',''))}</p></body></html>"""
+            path = self.scope_dir / f"{index:03d}_{slug}.html"
+            path.write_text(body, encoding="utf-8")
+            pages.append(path)
+        return pages
 
     async def _generate_markdown(
         self,
@@ -193,7 +268,7 @@ class TriageReporter:
                 lines.append(f"- {err}")
             lines.append("")
 
-        output_path = self.output_dir / f"report_{timestamp}.md"
+        output_path = self.scope_dir / f"report_{timestamp}.md"
         output_path.write_text("\n".join(lines))
         logger.info(f"Markdown report: {output_path}")
         return output_path
@@ -214,7 +289,7 @@ class TriageReporter:
                     timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
                     duration=time.time() - scan_state.start_time,
                 )
-                output_path = self.output_dir / f"report_{timestamp}.html"
+                output_path = self.scope_dir / f"report_{timestamp}.html"
                 output_path.write_text(html)
                 return output_path
             except Exception as e:
@@ -238,6 +313,6 @@ hr {{ border: 0; border-top: 1px solid #eee; margin: 30px 0; }}
 <pre>{md_content}</pre>
 </body></html>"""
 
-        output_path = self.output_dir / f"report_{timestamp}.html"
+        output_path = self.scope_dir / f"report_{timestamp}.html"
         output_path.write_text(html)
         return output_path

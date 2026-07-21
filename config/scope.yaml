@@ -3,13 +3,13 @@
 # This file enforces scope boundaries for all modules.
 
 program:
-  name: "infomaniak"
-  platform: "yeswehack"           # hackerone | bugcrowd | private
+  name: "APP NAME"
+  platform: "Source of program"           # hackerone | bugcrowd | private
   url: ""                         # Program URL for reference
 
 in_scope:
   domains:
-    - "*.infomaniak.com"
+    - "example.com"
   cidrs: []                       # e.g. "10.0.0.0/8"
   urls: []                        # Specific URL paths to include
 

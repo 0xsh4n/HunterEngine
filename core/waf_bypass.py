@@ -13,7 +13,10 @@ import string
 from dataclasses import dataclass, field
 from typing import Optional
 
-from fake_useragent import UserAgent
+try:  # Optional dependency: scans should still run in minimal environments.
+    from fake_useragent import UserAgent
+except ImportError:  # pragma: no cover - exercised when optional deps are absent
+    UserAgent = None  # type: ignore[assignment,misc]
 
 
 @dataclass
@@ -49,7 +52,8 @@ class WAFBypass:
 
     def __init__(self, config: Optional[BypassConfig] = None) -> None:
         self.config = config or BypassConfig()
-        self._ua = UserAgent(fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0")
+        self._fallback_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+        self._ua = UserAgent(fallback=self._fallback_ua) if UserAgent else None
 
     def get_headers(self, target_host: str = "") -> dict[str, str]:
         """
@@ -60,7 +64,7 @@ class WAFBypass:
 
         # User-Agent
         if self.config.ua_rotation:
-            headers["User-Agent"] = self._ua.random
+            headers["User-Agent"] = self._ua.random if self._ua else self._fallback_ua
         else:
             headers["User-Agent"] = (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

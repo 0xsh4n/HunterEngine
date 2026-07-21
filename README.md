@@ -61,6 +61,9 @@ Classic detectors, correlation, local AI triage, and multi-format reports still 
 | **Embedded proxy** | mitmproxy intercept / replay |
 | **Adaptive rate limiting** | Token bucket + WAF/429 backoff |
 | **Multi-format reports** | Markdown, HTML, HackerOne, Bugcrowd |
+| **Black-box / grey-box profiles** | Explicit testing posture with request budgets and circuit breakers |
+| **Local security RAG** | Ingest PDFs, blogs, Markdown, text, and HTML for assessment context |
+| **Evidence-aware reports** | Per-scope folders, per-finding HTML pages, and Eyewitness/Gowitness images |
 
 ---
 
@@ -163,6 +166,10 @@ python main.py scan --phase active_recon
 python main.py scan --phase enumeration
 python main.py scan --phase ai_test
 
+# Explicit testing posture (grey-box requires written authorization)
+python main.py scan --profile blackbox
+python main.py scan --profile greybox
+
 # Classic detectors / report triage
 python main.py scan --phase detect
 python main.py scan --phase ai
@@ -173,7 +180,34 @@ python main.py crawl https://target.com --headless
 
 python main.py scope
 python main.py check-tools
+
+# Build and query the separate local pentest knowledge pool
+python main.py knowledge-ingest ./research/
+python main.py knowledge-ingest ./owasp-testing-guide.pdf
+python main.py knowledge-search "SSRF metadata endpoint validation"
 ```
+
+### Knowledge pool / RAG
+
+The knowledge pool is an optional, local-only retrieval system. It accepts PDF,
+Markdown, plain text, HTML, and blog exports, chunks them, and stores a small
+searchable index at `data/knowledge/index.json`. During `ai_test`, relevant
+chunks are retrieved using the discovered endpoints, parameters, and technology
+fingerprints and supplied to the specialist agents as advisory context. The
+retrieved material never overrides scope, safety, or authorization controls.
+
+```yaml
+# config/settings.yaml
+knowledge:
+  enabled: true
+  index_path: "data/knowledge/index.json"
+  chunk_size: 1200
+  chunk_overlap: 180
+```
+
+Re-ingesting a source replaces its previous chunks, so the index is safe to
+refresh as research changes. PDF extraction uses `pypdf`; unsupported or
+unreadable files are skipped without stopping a scan.
 
 ---
 
@@ -228,6 +262,22 @@ ai:
       - jwt
 ```
 
+Active testing is policy-gated in `config/settings.yaml`. Black-box is the
+default and permits only safe read-oriented methods. Grey-box authentication
+must be explicitly authorized before enabling authenticated requests:
+
+```yaml
+testing:
+  profile: "blackbox"              # blackbox | greybox
+safety:
+  active_testing:
+    allowed_methods: ["GET", "HEAD", "OPTIONS"]
+    max_total_requests: 500
+    max_requests_per_host: 100
+    max_consecutive_timeouts: 3
+    greybox_authorized: false       # change only for an authorized assessment
+```
+
 ### Why `ai_test` used to finish instantly
 
 | Cause | What happens now |
@@ -257,6 +307,7 @@ python main.py scan
 | `scan --phase active_recon` | Live probe + tech FP agent |
 | `scan --phase crawl` / `enumeration` / `enum` | Enumeration agent |
 | `scan --phase ai_test` / `vuln` | Nested AI vuln hunters |
+| `scan --profile blackbox|greybox` | Select the authorized testing posture |
 | `scan --phase detect` | Classic detectors |
 | `scan --phase correlate` | Weak-signal chaining |
 | `scan --phase ai` | Report triage enrichment (not hunting) |
@@ -274,10 +325,44 @@ python main.py scan
 | `scope` | Print scope summary |
 | `history` | Scan history from memory DB |
 | `check-tools` | External tools + httpx resolution |
+| `knowledge-ingest <path>` | Index a PDF, blog export, text file, or directory |
+| `knowledge-search <query>` | Search the local knowledge index |
 
 ---
 
 ## Browser Auto-Crawl
+
+## Reports and proof-of-concept evidence
+
+Reports are grouped by the configured program/scope name. Every finding gets a
+standalone HTML page, making it easy to share or triage one issue at a time.
+When an image is available, the reporter copies it into the scope folder and
+embeds it in the finding page. It searches browser screenshots plus common
+Eyewitness and Gowitness output directories.
+
+```text
+data/reports/<scope-name>/
+├── report_<timestamp>.html
+├── report_<timestamp>.md
+├── 001_reflected-xss.html
+├── 002_idor.html
+└── evidence/
+    ├── 001_gowitness.png
+    └── 002_eyewitness.jpg
+```
+
+Configure additional image locations if your tooling writes elsewhere:
+
+```yaml
+reporting:
+  evidence_dirs:
+    - "data/screenshots"
+    - "data/eyewitness"
+    - "data/gowitness"
+```
+
+Missing screenshots never prevent HTML report generation; the finding page
+records that no proof image was found.
 
 ```bash
 python main.py crawl https://target.com

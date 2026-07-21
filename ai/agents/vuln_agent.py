@@ -42,6 +42,7 @@ class VulnHuntAgent(PhaseAgent):
             waf_bypass=self.ctx.waf_bypass,
             scope_loader=self.ctx.scope_loader,
             controller=self.ctx.controller,
+            knowledge_base=self.ctx.extras.get("knowledge_base"),
         )
         self.info(
             "dispatching nested hunters: %s",

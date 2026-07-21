@@ -5,6 +5,7 @@ from ai.subagents.base import PlannedProbe
 from ai.subagents import SUBAGENT_REGISTRY
 from core.orchestrator import Orchestrator, ScanPhase, PHASE_ALIASES
 from core.tool_resolver import describe_httpx_resolution, _is_python_httpx_cli
+from core.safety import ExecutionGuard, SafetyConfig
 
 
 def test_testing_config_mode_testing():
@@ -123,6 +124,17 @@ def test_httpx_resolution_describe():
     assert "projectdiscovery_httpx" in info
     assert "pip_httpx_library" in info
     assert "note" in info
+
+
+def test_active_testing_guard_blocks_state_changes_and_opens_circuit():
+    guard = ExecutionGuard(SafetyConfig(max_failures_per_host=2, cooldown_seconds=60))
+    assert guard.allow("POST", "https://app.example.com/api")[0] is False
+    assert guard.allow("GET", "https://app.example.com/api")[0] is True
+    guard.record_failure("https://app.example.com/api", "timeout")
+    guard.record_failure("https://app.example.com/api", "timeout")
+    allowed, reason = guard.allow("GET", "https://app.example.com/api")
+    assert allowed is False
+    assert "circuit" in reason
 
 
 def test_python_scripts_httpx_detected_as_pip(tmp_path):

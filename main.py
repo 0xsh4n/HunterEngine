@@ -46,6 +46,33 @@ app = typer.Typer(
 )
 
 
+@app.command(name="knowledge-ingest")
+def knowledge_ingest(
+    source: str = typer.Argument(..., help="PDF, text/blog file, or directory"),
+    index: str = typer.Option("data/knowledge/index.json", help="RAG index path"),
+) -> None:
+    """Ingest security research into the separate local RAG index."""
+    from knowledge.rag import KnowledgeBase
+    kb = KnowledgeBase(index)
+    kb.load()
+    count = kb.ingest(source)
+    console.print(f"Indexed {count} chunks → {index}")
+
+
+@app.command(name="knowledge-search")
+def knowledge_search(
+    query: str = typer.Argument(...),
+    index: str = typer.Option("data/knowledge/index.json", help="RAG index path"),
+    top_k: int = typer.Option(5, "--top-k"),
+) -> None:
+    """Search the local pentest knowledge index."""
+    from knowledge.rag import KnowledgeBase
+    kb = KnowledgeBase(index)
+    hits = kb.search(query, top_k=top_k)
+    for hit in hits:
+        console.print(f"[{hit.score:.3f}] {hit.chunk.source}\n{hit.chunk.text[:800]}\n")
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging with rich handler."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -98,6 +125,7 @@ def scan(
     auto_crawl: bool = typer.Option(False, "--auto-crawl", help="Enable integrated browser auto-crawl (ZAP-style)"),
     headed: bool = typer.Option(False, "--headed", help="Show the browser window during auto-crawl"),
     no_enum: bool = typer.Option(False, "--no-enum", help="Skip subdomain enumeration and only scan explicitly provided domains"),
+    profile: str = typer.Option("blackbox", "--profile", help="Testing profile: blackbox or greybox (greybox requires explicit authorization)"),
     resume: bool = typer.Option(False, "--resume", "-R", help="Resume from the latest checkpoint"),
     checkpoint: str = typer.Option(
         "",
@@ -124,6 +152,7 @@ def scan(
         headed=headed,
         skip_enum=no_enum,
         controller=controller,
+        profile=profile,
     )
 
     async def run_scan():
