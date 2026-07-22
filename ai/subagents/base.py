@@ -111,7 +111,12 @@ class HunterSubagent(ABC):
             ],
             "scan_context": context,
             "application_behavior": context.get("behavior_model", {}),
-            "instruction": "Explain which observed application behavior makes each probe relevant; do not invent routes or auth mechanisms.",
+            "domain_memory": context.get("domain_memory", {}),
+            "instruction": (
+                "Explain which observed application behavior makes each probe relevant; "
+                "prefer vuln classes and paths that domain_memory shows worked before; "
+                "do not invent routes or auth mechanisms."
+            ),
             "targets": targets,
         }
         user = json.dumps(user_payload, ensure_ascii=True, default=str)

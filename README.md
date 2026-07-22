@@ -64,6 +64,9 @@ Classic detectors, correlation, local AI triage, and multi-format reports still 
 | **Black-box / grey-box profiles** | Explicit testing posture with request budgets and circuit breakers |
 | **Local security RAG** | Ingest PDFs, blogs, Markdown, text, and HTML for assessment context |
 | **Evidence-aware reports** | Per-scope folders, per-finding HTML pages, and Eyewitness/Gowitness images |
+| **Web dashboard** | Config + AI Health check without editing YAML by hand |
+| **Docker (Ollama external)** | App containerized; Ollama stays on the host |
+| **Per-domain learning** | Behaviour profiles improve hunter order and path ranking per site |
 
 ---
 
@@ -199,6 +202,13 @@ failed host does not abort the remaining assessment.
 # Full agent pipeline
 python main.py scan
 
+# Web dashboard (config + AI health button) — preferred over hand-editing YAML
+python main.py dashboard
+# → http://127.0.0.1:8787
+
+# Verify Ollama before hunting
+python main.py ai-health
+
 # Full scan + visible browser enumeration
 python main.py scan --auto-crawl --headed
 
@@ -222,12 +232,35 @@ python main.py crawl https://target.com --headless
 
 python main.py scope
 python main.py check-tools
+python main.py domains
 
 # Build and query the separate local pentest knowledge pool
 python main.py knowledge-ingest ./research/
 python main.py knowledge-ingest ./owasp-testing-guide.pdf
 python main.py knowledge-search "SSRF metadata endpoint validation"
 ```
+
+### Docker (Ollama stays on the host)
+
+HunterEngine containers do **not** run Ollama. Start Ollama on your machine, then point the app at it:
+
+```bash
+# Host
+ollama serve
+ollama pull qwen3:4b
+
+# App + dashboard (Ollama external)
+docker compose up -d --build
+# Dashboard: http://localhost:8787  → click Health check
+
+# One-off scan
+docker compose run --rm hunterengine python main.py ai-health
+docker compose run --rm hunterengine python main.py scan --phase ai_test
+```
+
+`OLLAMA_BASE_URL` defaults to `http://host.docker.internal:11434` inside Compose. On Linux this works via `extra_hosts: host.docker.internal:host-gateway`. Override in `.env` if Ollama listens elsewhere.
+
+---
 
 ### Knowledge pool / RAG
 
@@ -320,22 +353,37 @@ safety:
     greybox_authorized: false       # change only for an authorized assessment
 ```
 
-### Why `ai_test` used to finish instantly
+### Why `ai_test` used to finish instantly / look broken
 
 | Cause | What happens now |
 |-------|------------------|
 | Empty endpoints when run alone | Seeds from scope domains / live hosts / historical URLs |
-| Ollama down | Clear warning: start Ollama + `ollama pull qwen3:4b` |
+| Ollama down / wrong base URL | Clear warning + `python main.py ai-health` / dashboard Health check |
+| Health check bug (model probe unreachable) | Fixed — daemon + model install + optional chat probe |
+| Hardcoded LAN Ollama IP in settings | Defaults to `127.0.0.1:11434`; Docker uses `OLLAMA_BASE_URL` |
 | `ai.enabled: false` or `mode: triage` | Logs that testing is disabled |
 | No interesting targets after seeding | Warning with remediation hints |
 
 Best quality: run enumeration first (or a full `scan`), then `ai_test`:
 
 ```bash
+python main.py ai-health
 python main.py scan --phase enumeration
 python main.py scan --phase ai_test
 # or simply:
 python main.py scan
+```
+
+### Domain learning
+
+After each scan, HunterEngine writes a small JSON profile under
+`data/domain_profiles/` for every in-scope host: auth mechanisms, useful
+hunters, path hits, and tech signals. The next `ai_test` against that domain
+reorders specialists and boosts historically interesting paths. This improves
+the **tool** over time per site; it does not fine-tune Ollama weights.
+
+```bash
+python main.py domains
 ```
 
 ---
@@ -359,6 +407,7 @@ python main.py scan
 | `scan --no-enum` | Skip subdomain enum; use scope domains only |
 | `scan --dry-run` | Validate config only |
 | `scan -v` / `--verbose` | Debug logging |
+| `scan --resume` / `--checkpoint` | Resume from checkpoint |
 | `crawl <URL>` | Standalone auto-crawl |
 | `crawl --headless` | Headless browser |
 | `crawl --max-pages N` | Page cap |
@@ -366,7 +415,11 @@ python main.py scan
 | `crawl --no-forms` | Disable form submit |
 | `scope` | Print scope summary |
 | `history` | Scan history from memory DB |
+| `checkpoints` | List saved checkpoints |
 | `check-tools` | External tools + httpx resolution |
+| `ai-health` | Probe Ollama daemon + model (+ chat probe) |
+| `dashboard` | Web UI for settings/scope + Health check button |
+| `domains` | List per-domain learning profiles |
 | `knowledge-ingest <path>` | Index a PDF, blog export, text file, or directory |
 | `knowledge-search <query>` | Search the local knowledge index |
 
@@ -420,7 +473,10 @@ Clicks links/buttons, fills forms, intercepts XHR/fetch/WebSocket, tracks SPA ro
 
 ```
 hunterengine/
-├── main.py                     # CLI (Typer)
+├── main.py                     # CLI (Typer) — all features wired here
+├── Dockerfile                  # App image (no Ollama)
+├── docker-compose.yml          # App + volumes; Ollama on host
+├── dashboard/                  # Web config UI + AI health button
 ├── config/
 │   ├── scope.yaml
 │   ├── settings.yaml
@@ -441,15 +497,15 @@ hunterengine/
 │   │   ├── enum_agent.py
 │   │   └── vuln_agent.py
 │   ├── subagents/              # Nested vuln hunters
-│   │   ├── xss_hunter.py
-│   │   ├── idor_hunter.py
-│   │   ├── ssti_hunter.py
-│   │   ├── smuggling_hunter.py
-│   │   └── …
 │   ├── testing_agent.py        # Probe planner / executor
+│   ├── behavior.py             # Auth / SPA / WAF hypotheses
 │   ├── ollama_client.py
 │   └── local_reasoner.py       # Report triage only
-├── crawl/  recon/  detection/  confidence/  memory/  proxy/  reporting/
+├── memory/
+│   ├── domain_learner.py       # Per-domain behaviour profiles
+│   └── …
+├── knowledge/                  # Local RAG index
+├── crawl/  recon/  detection/  confidence/  proxy/  reporting/
 ├── pyproject.toml
 └── requirements.txt
 ```
@@ -570,14 +626,25 @@ The AI testing phase combines specialist planning with deterministic safeguards.
 Before probing, it ranks endpoints, identifies likely authentication mechanisms
 (session, token/JWT, OAuth/SSO), finds signup candidates, and retrieves relevant
 RAG chunks. Each phase records success/failure telemetry and carries recent
-learning events into later AI prompts. Model failures are isolated per agent;
-scope, rate limits, request budgets, and circuit breakers remain authoritative.
-Scan output includes prompt, completion, total-token, and request counts for the
-testing model; usage is persisted in checkpoints. For unusual applications,
-`ai.testing.generated_agent: true` enables an ephemeral planner that returns
-the same structured probe format as built-in agents. Generated code is treated
-as text only and is never imported or executed; every probe still passes the
-deterministic safety gate.
+learning events into later AI prompts. **Per-domain profiles** under
+`data/domain_profiles/` remember which hunters and paths paid off on that host
+so later visits reorder specialists and boost interesting routes. Model failures
+are isolated per agent; scope, rate limits, request budgets, and circuit breakers
+remain authoritative. Use `python main.py ai-health` or the dashboard **Health
+check** button before a hunt. Scan output includes prompt, completion,
+total-token, and request counts for the testing model; usage is persisted in
+checkpoints. For unusual applications, `ai.testing.generated_agent: true`
+enables an ephemeral planner that returns the same structured probe format as
+built-in agents. Generated code is treated as text only and is never imported or
+executed; every probe still passes the deterministic safety gate.
+
+Prefer the dashboard when you do not want to edit YAML by hand:
+
+```bash
+python main.py dashboard
+# or
+docker compose up -d
+```
 
 ### Local RAG data pool
 

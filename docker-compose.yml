@@ -1,0 +1,31 @@
+# HunterEngine stack — Ollama is NOT included; point OLLAMA_BASE_URL at your host.
+#
+# Host Ollama (typical):
+#   ollama serve
+#   ollama pull qwen3:4b
+#
+# Then:
+#   docker compose up -d
+#   open http://localhost:8787  → Health check
+#
+# Scan example:
+#   docker compose run --rm hunterengine python main.py scan --phase ai_test
+
+services:
+  hunterengine:
+    build: .
+    image: hunterengine:latest
+    container_name: hunterengine
+    ports:
+      - "8787:8787"   # dashboard
+      - "8080:8080"   # optional mitm proxy
+    environment:
+      # Reach Ollama on the Docker host (Windows/macOS Docker Desktop)
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+    restart: unless-stopped
+    # Keep Ollama external — do not add an ollama service here.

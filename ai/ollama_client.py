@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
@@ -48,9 +49,10 @@ class OllamaClientConfig:
         env_base = os.getenv("OLLAMA_BASE_URL", "").strip()
         return cls(
             provider=block.get("provider", defaults.get("provider", provider)),
+            # Env wins so Docker can point at host.docker.internal without rewriting YAML
             base_url=(
-                block.get("base_url")
-                or env_base
+                env_base
+                or block.get("base_url")
                 or defaults.get("base_url")
                 or "http://127.0.0.1:11434"
             ),
@@ -97,34 +99,81 @@ class OllamaClient:
         return headers
 
     async def available(self) -> bool:
+        """Return True when the provider is reachable and the model is usable."""
+        report = await self.health_check()
+        return bool(report.get("ok"))
+
+    async def health_check(self) -> dict[str, Any]:
+        """
+        Detailed AI readiness probe for CLI / dashboard.
+
+        Checks daemon reachability and (for Ollama) that the configured model
+        is installed — the previous implementation left the model check
+        unreachable after ``return False``, so healthy endpoints looked down.
+        """
         provider = self.config.provider.lower().strip()
         base = self.config.base_url.rstrip("/")
         health = base + ("/api/tags" if provider == "ollama" else "/v1/models")
+        report: dict[str, Any] = {
+            "ok": False,
+            "provider": provider,
+            "base_url": base,
+            "model": self.config.model,
+            "endpoint": health,
+            "models": [],
+            "error": "",
+            "latency_ms": None,
+        }
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=min(self.config.timeout, 3.0)) as client:
+            async with httpx.AsyncClient(timeout=min(self.config.timeout, 5.0)) as client:
                 response = await client.get(health, headers=self.headers())
+            report["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
+            report["status_code"] = response.status_code
             if response.status_code >= 500:
                 self.availability_error = f"HTTP {response.status_code} from {health}"
-                return False
-                if provider == "ollama" and response.status_code == 200:
-                    # A healthy daemon without the configured model cannot answer
-                    # planner calls; detect this before launching nine timeouts.
-                    try:
-                        models = response.json().get("models", [])
-                        names = {str(row.get("name", "")) for row in models if isinstance(row, dict)}
-                        if not names:
-                            self.availability_error = "Ollama is running but returned no models"
-                            return False
-                        if not any(self.config.model == name or self.config.model.split(":")[0] == name.split(":")[0] for name in names):
-                            self.availability_error = f"Configured model not installed: {self.config.model}"
-                            return False
-                    except (ValueError, TypeError, AttributeError):
-                        self.availability_error = "Ollama /api/tags returned invalid JSON"
-                        return False
-                return response.status_code < 500
+                report["error"] = self.availability_error
+                return report
+
+            if provider == "ollama":
+                try:
+                    payload = response.json()
+                    models = payload.get("models", []) if isinstance(payload, dict) else []
+                    names = sorted(
+                        {str(row.get("name", "")) for row in models if isinstance(row, dict) and row.get("name")}
+                    )
+                    report["models"] = names
+                    if not names:
+                        self.availability_error = "Ollama is running but returned no models"
+                        report["error"] = self.availability_error
+                        return report
+                    model_ok = any(
+                        self.config.model == name
+                        or self.config.model.split(":")[0] == name.split(":")[0]
+                        for name in names
+                    )
+                    if not model_ok:
+                        self.availability_error = f"Configured model not installed: {self.config.model}"
+                        report["error"] = self.availability_error
+                        report["hint"] = f"Run: ollama pull {self.config.model}"
+                        return report
+                except (ValueError, TypeError, AttributeError):
+                    self.availability_error = "Ollama /api/tags returned invalid JSON"
+                    report["error"] = self.availability_error
+                    return report
+            elif response.status_code >= 400:
+                self.availability_error = f"HTTP {response.status_code} from {health}"
+                report["error"] = self.availability_error
+                return report
+
+            self.availability_error = ""
+            report["ok"] = True
+            return report
         except Exception as exc:
+            report["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
             self.availability_error = f"{type(exc).__name__}: {exc}"
-            return False
+            report["error"] = self.availability_error
+            return report
 
     async def chat(
         self,

@@ -30,6 +30,9 @@ data/findings.db
 data/reports/
 data/screenshots/
 data/sessions/
+data/checkpoints/
+data/domain_profiles/
+data/knowledge/index.json
 
 # ─── IDE / Editors ────────────────────────────────────────────────────────
 .vscode/

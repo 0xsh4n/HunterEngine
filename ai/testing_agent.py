@@ -25,6 +25,7 @@ from core.waf_bypass import WAFBypass
 from core.safety import ExecutionGuard, SafetyConfig
 from detection.base_detector import Severity
 from knowledge.rag import KnowledgeBase
+from memory.domain_learner import DomainLearner
 
 logger = logging.getLogger("hunterengine.ai.testing_agent")
 
@@ -175,6 +176,7 @@ class TestingAgent:
         scope_loader: Optional[ScopeLoader] = None,
         controller: Any = None,
         knowledge_base: Optional[KnowledgeBase] = None,
+        domain_learner: Optional[DomainLearner] = None,
     ) -> None:
         self.config = config
         self.rate_limiter = rate_limiter
@@ -182,11 +184,13 @@ class TestingAgent:
         self.scope = scope_loader
         self.controller = controller
         self.knowledge_base = knowledge_base
+        self.domain_learner = domain_learner or DomainLearner()
         self.client = OllamaClient(config.to_client_config())
         self._sem = asyncio.Semaphore(max(1, config.concurrency))
         self._probe_sem = asyncio.Semaphore(max(1, config.concurrency))
         self.guard = ExecutionGuard(config.safety)
         self._target_urls: set[str] = set()
+        self._domain_context: dict[str, Any] = {}
 
     @staticmethod
     def seed_targets_from_scope(scan_state: Any, scope_loader: Any = None) -> int:
@@ -276,6 +280,13 @@ class TestingAgent:
         if seeded:
             logger.info("AI testing: seeded %d endpoint(s) for empty scan state", seeded)
 
+        seed_urls = [
+            str(ep.get("url", ""))
+            for ep in (getattr(scan_state, "endpoints", []) or [])
+            if ep.get("url")
+        ]
+        self._domain_context = self.domain_learner.context_for_targets(seed_urls)
+
         targets = self._select_targets(scan_state)
         # A host-only scope should always yield at least one safe target even
         # when crawlers return no routes or all routes are low-scoring.
@@ -297,13 +308,28 @@ class TestingAgent:
             )
             return []
 
+        # Refresh memory with the final ranked target set
+        self._domain_context = self.domain_learner.context_for_targets(
+            [t["url"] for t in targets]
+        )
+        ordered_agents = self.domain_learner.rank_subagents(
+            self.config.subagents, self._domain_context
+        )
+        if ordered_agents != self.config.subagents:
+            logger.info(
+                "Domain learning reordered hunters: %s",
+                ",".join(ordered_agents),
+            )
+            self.config.subagents = ordered_agents
+
         logger.info(
-            "AI bug hunter: %d targets via %s/%s (think=%s) subagents=%s",
+            "AI bug hunter: %d targets via %s/%s (think=%s) subagents=%s domain_memory=%s",
             len(targets),
             self.config.provider,
             self.config.model,
             self.config.think,
             ",".join(self.config.subagents),
+            ",".join(self._domain_context.get("domains") or []) or "none",
         )
 
         context = self._compact_context(scan_state)
@@ -404,6 +430,8 @@ class TestingAgent:
             query_keys = list(parse_qs(parsed.query).keys())
             mined = list(params_map.get(url, []) or [])[:12]
             score = self._interest_score(url, method, query_keys + mined, ep)
+            if self._domain_context:
+                score += self.domain_learner.interest_boost(url, self._domain_context)
             # Keep scope-seeded targets even without params (phase-only ai_test)
             if score <= 0 and str(ep.get("source", "")).startswith("seed_"):
                 score = 0.5
@@ -479,6 +507,13 @@ class TestingAgent:
             "knowledge": self._knowledge_context(scan_state),
             "behavior_model": getattr(scan_state, "behavior_model", {}) or {},
             "learning_events": (getattr(scan_state, "learning_events", []) or [])[-20:],
+            "domain_memory": {
+                "domains": self._domain_context.get("domains", []),
+                "preferred_subagents": self._domain_context.get("preferred_subagents", []),
+                "successful_classes": self._domain_context.get("successful_classes", []),
+                "auth_mechanisms": self._domain_context.get("auth_mechanisms", []),
+                "hints": self._domain_context.get("hints", []),
+            },
         }
 
     def _knowledge_context(self, scan_state: Any) -> list[dict]:

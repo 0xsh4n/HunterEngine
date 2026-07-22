@@ -4,6 +4,24 @@ All notable changes to HunterEngine will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] — 2026-07-22
+
+### Added
+- **Web dashboard** (`python main.py dashboard`) for settings/scope + AI Health check button
+- **`ai-health` CLI** — daemon reachability, model install check, optional chat probe
+- **Docker / Compose** — HunterEngine containerized; **Ollama stays external** via `OLLAMA_BASE_URL`
+- **Per-domain learning** (`memory/domain_learner.py`) — behaviour profiles improve hunter order and path ranking
+- **`domains` CLI** — list learned domain profiles
+- Richer `ai.behavior` signals (API surface, WAF hints, method/status distribution)
+
+### Fixed
+- Ollama `available()` / health check: model-install probe was dead code after `return False`, so healthy endpoints were treated as down
+- Default Ollama URL no longer points at a private LAN IP; `OLLAMA_BASE_URL` overrides YAML for Docker
+
+### Changed
+- README documents dashboard, Docker (external Ollama), health checks, and domain learning
+- `main.py` exposes dashboard / ai-health / domains / knowledge / checkpoints alongside scan pipeline
+
 ## [3.0.0] — 2026-07-18
 
 ### Added

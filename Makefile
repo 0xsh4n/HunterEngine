@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint typecheck test scan crawl check-tools clean help
+.PHONY: install install-dev lint typecheck test scan crawl check-tools dashboard ai-health docker-up clean help
 
 # ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -30,6 +30,15 @@ crawl:                           ## Run standalone auto-crawl (set TARGET env va
 
 check-tools:                     ## Check installed external tools
 	python main.py check-tools
+
+ai-health:                       ## Probe external Ollama / configured model
+	python main.py ai-health
+
+dashboard:                       ## Web config UI + health check button
+	python main.py dashboard
+
+docker-up:                       ## Build/run app container (Ollama on host)
+	docker compose up -d --build
 
 # ── Housekeeping ──────────────────────────────────────────────────────────
 

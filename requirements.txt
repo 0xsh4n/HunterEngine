@@ -41,3 +41,7 @@ validators>=0.22
 beautifulsoup4>=4.12
 lxml>=4.9
 pypdf>=4.0
+
+# Web dashboard (config + AI health)
+fastapi>=0.110
+uvicorn[standard]>=0.27

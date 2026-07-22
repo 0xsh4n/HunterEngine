@@ -129,14 +129,14 @@ ai:
   redact_sensitive: true
   # Reporting / triage model (used when mode is triage or both)
   local_model:
-    base_url: "http://10.3.20.55:11434"
+    base_url: "http://127.0.0.1:11434"   # Docker: http://host.docker.internal:11434
     model: "qwen3:4b"
     timeout: 45
     temperature: 0.1
     api_key_env: ""
   # Testing / bug-hunt model — Qwen3 4B with reasoning (Ollama think)
   testing_model:
-    base_url: "http://10.3.20.55:11434"
+    base_url: "http://127.0.0.1:11434"   # External Ollama; override via OLLAMA_BASE_URL
     model: "qwen3:4b"
     timeout: 90
     temperature: 0.2
@@ -153,6 +153,7 @@ ai:
     max_probes_per_agent: 8
     max_total_probes: 60
     min_confidence: 0.55
+    domain_learning: true         # Persist per-domain behaviour for smarter later scans
     subagents:
       - xss
       - idor

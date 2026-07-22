@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hunterengine"
-version = "3.0.0"
+version = "3.1.0"
 description = "Automated bug bounty engine with hierarchical agents: recon → active recon → enumeration → nested AI vuln hunters."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -68,6 +68,10 @@ dependencies = [
     "validators>=0.22",
     "beautifulsoup4>=4.12",
     "lxml>=4.9",
+    "pypdf>=4.0",
+    # Dashboard
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -103,6 +107,8 @@ include = [
     "confidence*",
     "proxy*",
     "config*",
+    "knowledge*",
+    "dashboard*",
 ]
 
 [tool.black]

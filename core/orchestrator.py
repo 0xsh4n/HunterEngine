@@ -447,6 +447,7 @@ class Orchestrator:
                 await self._handle_control(phase.value, next_phase=upcoming)
 
             self.state.phase = ScanPhase.DONE
+            self._persist_domain_learning()
             # Clear latest resume pointer on successful completion
             try:
                 latest = self.checkpoints.directory / "latest.json"
@@ -459,6 +460,7 @@ class Orchestrator:
         except ScanStopped as stop:
             logger.warning("%s", stop)
             if stop.action == "quit" and not stop.saved:
+                self._persist_domain_learning()
                 self._save_checkpoint("quit", next_phase=self.state.phase.value)
             raise
         finally:
@@ -469,6 +471,23 @@ class Orchestrator:
                 await self.proxy.stop()
 
         return self.state
+
+    def _persist_domain_learning(self) -> None:
+        """Write per-domain behaviour profiles once per run."""
+        if getattr(self, "_domain_learned", False):
+            return
+        from memory.domain_learner import DomainLearner
+
+        data_dir = (self.settings.get("general", {}) or {}).get("data_dir", "data")
+        learner = DomainLearner(f"{data_dir}/domain_profiles")
+        try:
+            updated = learner.learn_from_scan(self.state, self.scope_loader)
+            self._domain_learned = True
+            if updated:
+                logger.info("Domain learning wrote %d profile(s)", len(updated))
+        except Exception as exc:
+            logger.warning("Domain learning failed: %s", exc)
+            self.state.errors.append(f"domain_learn: {exc}")
 
     async def _run_recon(self) -> None:
         """Passive recon agent: subdomain enum → DNS → historical URLs."""

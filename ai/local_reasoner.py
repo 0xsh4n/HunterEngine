@@ -54,10 +54,12 @@ class LocalAIConfig:
         return cls(
             enabled=triage_on,
             provider=local_conf.get("provider", ai_conf.get("provider", "ollama")),
-            base_url=local_conf.get(
-                "base_url",
-                ai_conf.get("base_url", env_base or "http://127.0.0.1:11434"),
-            ) or (env_base or "http://127.0.0.1:11434"),
+            base_url=(
+                env_base
+                or local_conf.get("base_url")
+                or ai_conf.get("base_url")
+                or "http://127.0.0.1:11434"
+            ),
             model=local_conf.get("model", ai_conf.get("model", "qwen2.5:7b-instruct")),
             timeout=float(local_conf.get("timeout", ai_conf.get("timeout", 45))),
             temperature=float(local_conf.get("temperature", ai_conf.get("temperature", 0.1))),

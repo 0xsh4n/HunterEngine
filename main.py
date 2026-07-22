@@ -18,6 +18,11 @@ Usage:
     python main.py scope                          # Show current scope
     python main.py history                        # Show scan history
     python main.py check-tools                    # Check installed tools (resolves PD vs pip httpx)
+    python main.py ai-health                      # Probe Ollama / configured model
+    python main.py dashboard                      # Web UI for config + health check
+    python main.py domains                        # Show per-domain learning profiles
+    python main.py knowledge-ingest ./research    # Index local pentest docs into RAG
+    python main.py knowledge-search "SSRF"        # Search the local knowledge index
 
 Controls during scan:
     Ctrl+C  → pause at next phase boundary → [r]esume / [q]uit+save / [a]bort
@@ -104,7 +109,7 @@ def print_banner() -> None:
  ███████╗██║ ╚████║╚██████╔╝██║██║ ╚████║███████╗
  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝╚══════╝
     """
-    console.print(Panel(banner, title="v3.0.0", border_style="blue"))
+    console.print(Panel(banner, title="v3.1.0", border_style="blue"))
 
 
 # ── Commands ──────────────────────────────────────────────────────────────
@@ -547,6 +552,132 @@ def check_tools() -> None:
             pkg_table.add_row(pkg, "[red]✗ missing[/red]")
 
     console.print(pkg_table)
+
+
+@app.command(name="ai-health")
+def ai_health(
+    settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
+    probe: bool = typer.Option(True, "--probe/--no-probe", help="Also send a short chat probe"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """Check whether the configured local AI (Ollama) is reachable and usable."""
+    setup_logging(verbose)
+
+    async def _run() -> int:
+        import yaml
+        from ai.ollama_client import OllamaClient
+        from ai.testing_agent import TestingAIConfig
+
+        path = Path(settings)
+        conf = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+        cfg = TestingAIConfig.from_settings(conf or {})
+        client = OllamaClient(cfg.to_client_config())
+        report = await client.health_check()
+
+        table = Table(title="AI Health Check")
+        table.add_column("Field", style="cyan")
+        table.add_column("Value")
+        table.add_row("Provider", str(report.get("provider")))
+        table.add_row("Base URL", str(report.get("base_url")))
+        table.add_row("Model", str(report.get("model")))
+        table.add_row("Endpoint", str(report.get("endpoint")))
+        table.add_row("Latency", f"{report.get('latency_ms')} ms")
+        table.add_row("Daemon OK", "[green]yes[/green]" if report.get("ok") else "[red]no[/red]")
+        models = report.get("models") or []
+        table.add_row("Installed models", ", ".join(models[:12]) or "(none)")
+        if report.get("error"):
+            table.add_row("Error", f"[red]{report['error']}[/red]")
+        if report.get("hint"):
+            table.add_row("Hint", str(report["hint"]))
+        console.print(table)
+
+        chat_ok = False
+        if probe and report.get("ok"):
+            console.print("\n[dim]Sending chat probe…[/dim]")
+            try:
+                reply = await client.chat(
+                    system="Reply with exactly: pong",
+                    user="ping",
+                    json_mode=False,
+                    think=False,
+                )
+                chat_ok = bool((reply or "").strip())
+                console.print(Panel((reply or "")[:400] or "(empty)", title="Chat probe reply", border_style="green" if chat_ok else "red"))
+            except Exception as exc:
+                console.print(f"[red]Chat probe failed: {exc}[/red]")
+        elif not report.get("ok"):
+            console.print(
+                "\n[yellow]Fix the daemon/model issue first.[/yellow]\n"
+                "[dim]Local: ollama serve && ollama pull qwen3:4b[/dim]\n"
+                "[dim]Docker: set OLLAMA_BASE_URL=http://host.docker.internal:11434[/dim]\n"
+                "[dim]Or open the dashboard: python main.py dashboard[/dim]"
+            )
+
+        ok = bool(report.get("ok") and (chat_ok if probe else True))
+        if ok:
+            console.print("\n[bold green]AI is working.[/bold green]")
+            return 0
+        console.print("\n[bold red]AI health check failed.[/bold red]")
+        return 1
+
+    raise typer.Exit(asyncio.run(_run()))
+
+
+@app.command()
+def dashboard(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (0.0.0.0 for Docker)"),
+    port: int = typer.Option(8787, "--port", help="Dashboard port"),
+    settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
+    scope: str = typer.Option("config/scope.yaml", help="Path to scope.yaml"),
+) -> None:
+    """Launch the web dashboard for config + AI health (Ollama stays external)."""
+    setup_logging(False)
+    print_banner()
+    console.print(
+        Panel(
+            f"Open http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}\n"
+            "Use the Health check button to verify Ollama.\n"
+            "Ollama is not started by HunterEngine — run it on the host.",
+            title="Dashboard",
+            border_style="cyan",
+        )
+    )
+    from dashboard.app import run_dashboard
+
+    run_dashboard(host=host, port=port, settings_path=settings, scope_path=scope)
+
+
+@app.command()
+def domains(
+    data_dir: str = typer.Option("data", help="Data directory containing domain_profiles/"),
+) -> None:
+    """List per-domain learning profiles built from prior scans."""
+    setup_logging(False)
+    from memory.domain_learner import DomainLearner
+
+    learner = DomainLearner(f"{data_dir.rstrip('/').rstrip(chr(92))}/domain_profiles")
+    rows = learner.list_profiles()
+    if not rows:
+        console.print("[yellow]No domain profiles yet. Run a scan to start learning.[/yellow]")
+        return
+
+    table = Table(title="Domain Learning Profiles")
+    table.add_column("Domain", style="cyan")
+    table.add_column("Scans", justify="right")
+    table.add_column("Preferred hunters")
+    table.add_column("Auth")
+    table.add_column("Updated")
+    for row in rows:
+        updated = row.get("updated_at")
+        updated_s = time.strftime("%Y-%m-%d %H:%M", time.localtime(updated)) if updated else "—"
+        table.add_row(
+            str(row.get("domain", "")),
+            str(row.get("scan_count", 0)),
+            ", ".join(row.get("preferred_subagents") or []) or "—",
+            ", ".join(row.get("auth_mechanisms") or []) or "—",
+            updated_s,
+        )
+    console.print(table)
 
 
 # ── Output helpers ────────────────────────────────────────────────────────
