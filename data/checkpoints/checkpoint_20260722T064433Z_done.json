@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "saved_at": "2026-07-22T06:44:33.053409+00:00",
+  "reason": "done",
+  "completed_phases": [
+    "recon",
+    "active_recon",
+    "crawl",
+    "ai_test",
+    "detect",
+    "correlate",
+    "ai",
+    "report"
+  ],
+  "next_phase": null,
+  "meta": {
+    "scope_path": "config/scope.yaml",
+    "settings_path": "config/settings.yaml",
+    "auto_crawl": false,
+    "headed": false,
+    "skip_enum": false
+  },
+  "state": {
+    "phase": "done",
+    "start_time": 1784702508.7941022,
+    "subdomains": [],
+    "live_hosts": [],
+    "historical_urls": [
+      "https://testphp.vulnweb.com"
+    ],
+    "tech_stack": {},
+    "endpoints": [
+      {
+        "url": "https://testphp.vulnweb.com",
+        "method": "GET",
+        "source": "seed_historical",
+        "status": 0
+      }
+    ],
+    "js_files": [],
+    "params": {},
+    "graphql_schemas": [],
+    "findings": [],
+    "weak_signals": [],
+    "chained_findings": [],
+    "ai_enriched_findings": 0,
+    "ai_test_probes": 0,
+    "ai_test_findings": 0,
+    "total_requests": 0,
+    "errors": [
+      "ai_test: name 'scan_state' is not defined",
+      "Traceback (most recent call last):\n  File \"/home/ghost/Projects/HunterEngine/core/orchestrator.py\", line 404, in run\n    await runner()\n  File \"/home/ghost/Projects/HunterEngine/core/orchestrator.py\", line 499, in _run_ai_test\n    await VulnHuntAgent(self._agent_context()).run(self.state)\n  File \"/home/ghost/Projects/HunterEngine/ai/agents/vuln_agent.py\", line 52, in run\n    findings = await agent.run(state)\n               ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ghost/Projects/HunterEngine/ai/testing_agent.py\", line 278, in run\n    await self._control_gate(\"ai_test:plan\")\n  File \"/home/ghost/Projects/HunterEngine/ai/testing_agent.py\", line 303, in _control_gate\n    setattr(scan_state, \"ai_test_probes\", len(probes))\n            ^^^^^^^^^^\nNameError: name 'scan_state' is not defined\n"
+    ],
+    "agentic_decisions": [
+      {
+        "action": "discover_endpoints",
+        "priority": 1.0,
+        "rationale": "No attack surface discovered yet",
+        "evidence": []
+      }
+    ],
+    "phase_health": {
+      "recon": {
+        "status": "ok",
+        "elapsed": 25.41
+      },
+      "active_recon": {
+        "status": "ok",
+        "elapsed": 52.2
+      },
+      "crawl": {
+        "status": "ok",
+        "elapsed": 2.8
+      },
+      "ai_test": {
+        "status": "failed",
+        "error": "name 'scan_state' is not defined",
+        "traceback": "Traceback (most recent call last):\n  File \"/home/ghost/Projects/HunterEngine/core/orchestrator.py\", line 404, in run\n    await runner()\n  File \"/home/ghost/Projects/HunterEngine/core/orchestrator.py\", line 499, in _run_ai_test\n    await VulnHuntAgent(self._agent_context()).run(self.state)\n  File \"/home/ghost/Projects/HunterEngine/ai/agents/vuln_agent.py\", line 52, in run\n    findings = await agent.run(state)\n               ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ghost/Projects/HunterEngine/ai/testing_agent.py\", line 278, in run\n    await self._control_gate(\"ai_test:plan\")\n  File \"/home/ghost/Projects/HunterEngine/ai/testing_agent.py\", line 303, in _control_gate\n    setattr(scan_state, \"ai_test_probes\", len(probes))\n            ^^^^^^^^^^\nNameError: name 'scan_state' is not defined\n"
+      },
+      "detect": {
+        "status": "ok",
+        "elapsed": 76.41
+      },
+      "correlate": {
+        "status": "ok",
+        "elapsed": 0.09
+      },
+      "ai": {
+        "status": "ok",
+        "elapsed": 0.02
+      },
+      "report": {
+        "status": "ok",
+        "elapsed": 0.15
+      }
+    },
+    "behavior_model": {
+      "authentication_endpoints": [],
+      "signup_endpoints": [],
+      "mechanisms": [],
+      "behavior_hypotheses": [
+        "No obvious authentication route discovered.",
+        "No account creation route discovered."
+      ]
+    },
+    "learning_events": [
+      {
+        "phase": "recon",
+        "result": "success",
+        "elapsed": 25.41
+      },
+      {
+        "phase": "active_recon",
+        "result": "success",
+        "elapsed": 52.2
+      },
+      {
+        "phase": "crawl",
+        "result": "success",
+        "elapsed": 2.8
+      },
+      {
+        "phase": "ai_test",
+        "result": "failure",
+        "error": "name 'scan_state' is not defined"
+      },
+      {
+        "phase": "detect",
+        "result": "success",
+        "elapsed": 76.41
+      },
+      {
+        "phase": "correlate",
+        "result": "success",
+        "elapsed": 0.09
+      },
+      {
+        "phase": "ai",
+        "result": "success",
+        "elapsed": 0.02
+      },
+      {
+        "phase": "report",
+        "result": "success",
+        "elapsed": 0.15
+      }
+    ]
+  }
+}

@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "saved_at": "2026-07-22T10:13:15.198362+00:00",
+  "reason": "phase",
+  "completed_phases": [
+    "recon",
+    "active_recon"
+  ],
+  "next_phase": "crawl",
+  "meta": {
+    "scope_path": "config/scope.yaml",
+    "settings_path": "config/settings.yaml",
+    "auto_crawl": false,
+    "headed": false,
+    "skip_enum": true
+  },
+  "state": {
+    "phase": "active_recon",
+    "start_time": 1784715083.0166235,
+    "subdomains": [
+      "brainapp.in",
+      "trackswift.brainapp.in"
+    ],
+    "live_hosts": [
+      {
+        "url": "https://brainapp.in",
+        "status": 200,
+        "title": "NexBrain Analytics & Security",
+        "tech": [
+          "Cloudflare",
+          "HTTP/3"
+        ],
+        "content_length": 1326,
+        "webserver": "cloudflare",
+        "host": "brainapp.in",
+        "scheme": "https"
+      },
+      {
+        "url": "https://trackswift.brainapp.in",
+        "status": 200,
+        "title": "TrackSwift \u2013 Finance & Inventory",
+        "tech": [
+          "Cloudflare",
+          "HTTP/3",
+          "Render"
+        ],
+        "content_length": 71217,
+        "webserver": "cloudflare",
+        "host": "trackswift.brainapp.in",
+        "scheme": "https"
+      }
+    ],
+    "historical_urls": [
+      "https://trackswift.brainapp.in",
+      "https://brainapp.in",
+      "http://brainapp.in:80/brain/brain/wp-json/oembed/1.0/embedccb7?url=https://www.axovel.com/&format=xml",
+      "http://brainapp.in:80/brain/brain/wp-json/oembed/1.0/embedf5bf.json?url=https://www.axovel.com/about_us/",
+      "http://brainapp.in:80/brain/brain/index.html",
+      "http://brainapp.in:80/brain/brain/wp-content/plugins/easy-logo-slider/js/jquery.jcarousel.minef15.html?ver=4.8",
+      "http://brainapp.in:80/brain/index.html",
+      "http://brainapp.in:80/brain/brain/wp-includes/wlwmanifest.xml",
+      "http://brainapp.in:80/brain/brain/wp-json/oembed/1.0/embed2edf.json?url=https://www.axovel.com/",
+      "http://brainapp.in:80/brain/brain/wp-json/oembed/1.0/embed9a46?url=https://www.axovel.com/about_us/&format=xml",
+      "http://brainapp.in:80/brain/brain",
+      "http://brainapp.in:80/brain/brain/wp-json/index.html",
+      "http://brainapp.in:80/brain/brain/indexbde5.html?p=80",
+      "http://brainapp.in:80/brain/brain/wp-content/plugins/easy-logo-slider/js/jcarousel.responsiveef15.html?ver=4.8",
+      "http://brainapp.in:80/brain/brain/blogs/index.html",
+      "http://brainapp.in:80/brain/brain/about_us/blogs/index.html",
+      "http://brainapp.in/",
+      "http://brainapp.in:80/brain/brain/about_us/index.html",
+      "http://brainapp.in/robots.txt",
+      "http://brainapp.in:80/brain/brain/contact_us/index.html"
+    ],
+    "tech_stack": {
+      "https://brainapp.in": {
+        "url": "https://brainapp.in",
+        "frameworks": [],
+        "languages": [],
+        "servers": [],
+        "cms": [],
+        "cdn": [
+          "cloudflare"
+        ],
+        "js_libraries": [],
+        "is_spa": false,
+        "has_graphql": false,
+        "has_api": false,
+        "raw_headers": {
+          "date": "Wed, 22 Jul 2026 10:13:13 GMT",
+          "content-type": "text/html; charset=utf-8",
+          "content-length": "533",
+          "connection": "keep-alive",
+          "cache-control": "public, max-age=0, s-maxage=300",
+          "accept-ranges": "bytes",
+          "content-encoding": "br",
+          "etag": "\"ce3a212ba667aad261104237c2325e91\"",
+          "last-modified": "Fri, 06 Mar 2026 17:42:50 UTC",
+          "rndr-id": "6745d4d6-fc38-433d",
+          "server": "cloudflare",
+          "vary": "Accept-Encoding, Accept-Encoding",
+          "x-content-type-options": "nosniff",
+          "cf-cache-status": "HIT",
+          "cf-ray": "a1f1abe86fb26ee9-BOM",
+          "alt-svc": "h3=\":443\"; ma=86400"
+        }
+      },
+      "https://trackswift.brainapp.in": {
+        "url": "https://trackswift.brainapp.in",
+        "frameworks": [],
+        "languages": [],
+        "servers": [],
+        "cms": [],
+        "cdn": [
+          "cloudflare"
+        ],
+        "js_libraries": [],
+        "is_spa": false,
+        "has_graphql": false,
+        "has_api": false,
+        "raw_headers": {
+          "date": "Wed, 22 Jul 2026 10:13:14 GMT",
+          "content-type": "text/html; charset=utf-8",
+          "transfer-encoding": "chunked",
+          "connection": "keep-alive",
+          "cache-control": "s-maxage=31536000, stale-while-revalidate",
+          "content-encoding": "gzip",
+          "etag": "\"n2o1lylvjk1iy3\"",
+          "rndr-id": "4da705d4-5495-41fc",
+          "server": "cloudflare",
+          "vary": "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Url, Accept-Encoding",
+          "x-nextjs-cache": "HIT",
+          "x-render-origin-server": "Render",
+          "cf-cache-status": "DYNAMIC",
+          "cf-ray": "a1f1abebd8ce4805-BOM",
+          "alt-svc": "h3=\":443\"; ma=86400"
+        }
+      }
+    },
+    "endpoints": [],
+    "js_files": [],
+    "params": {},
+    "graphql_schemas": [],
+    "findings": [],
+    "weak_signals": [],
+    "chained_findings": [],
+    "ai_enriched_findings": 0,
+    "ai_test_probes": 0,
+    "ai_test_findings": 0,
+    "total_requests": 0,
+    "errors": [],
+    "agentic_decisions": [],
+    "phase_health": {
+      "recon": {
+        "status": "ok",
+        "elapsed": 70.09
+      },
+      "active_recon": {
+        "status": "ok",
+        "elapsed": 32.27
+      }
+    },
+    "behavior_model": {},
+    "learning_events": [
+      {
+        "phase": "recon",
+        "result": "success",
+        "elapsed": 70.09
+      },
+      {
+        "phase": "active_recon",
+        "result": "success",
+        "elapsed": 32.27
+      }
+    ],
+    "ai_token_usage": {}
+  }
+}

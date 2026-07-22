@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "saved_at": "2026-07-22T06:25:18.923699+00:00",
+  "reason": "phase",
+  "completed_phases": [
+    "crawl"
+  ],
+  "next_phase": null,
+  "meta": {
+    "scope_path": "config/scope.yaml",
+    "settings_path": "config/settings.yaml",
+    "auto_crawl": false,
+    "headed": false,
+    "skip_enum": false
+  },
+  "state": {
+    "phase": "crawl",
+    "start_time": 1784701517.1684966,
+    "subdomains": [],
+    "live_hosts": [],
+    "historical_urls": [],
+    "tech_stack": {},
+    "endpoints": [],
+    "js_files": [],
+    "params": {},
+    "graphql_schemas": [],
+    "findings": [],
+    "weak_signals": [],
+    "chained_findings": [],
+    "ai_enriched_findings": 0,
+    "ai_test_probes": 0,
+    "ai_test_findings": 0,
+    "total_requests": 0,
+    "errors": [],
+    "agentic_decisions": [],
+    "phase_health": {
+      "crawl": {
+        "status": "ok",
+        "elapsed": 0.07
+      }
+    }
+  }
+}

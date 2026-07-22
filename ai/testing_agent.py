@@ -62,6 +62,8 @@ class TestingAIConfig:
     extra_headers: dict[str, str] = field(default_factory=dict)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     profile: str = "blackbox"
+    generated_agent: bool = False
+    planner_deadline: float = 25.0
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "TestingAIConfig":
@@ -120,6 +122,8 @@ class TestingAIConfig:
             extra_headers=client_cfg.extra_headers,
             safety=safety,
             profile=safety.profile,
+            generated_agent=bool(testing.get("generated_agent", False)),
+            planner_deadline=max(3.0, float(testing.get("planner_deadline", 25.0))),
         )
 
     def to_client_config(self) -> OllamaClientConfig:
@@ -138,6 +142,17 @@ class TestingAIConfig:
 
 
 TestingAIConfig.__test__ = False  # type: ignore[attr-defined]
+
+
+class EphemeralAgentAdapter:
+    """Duck-typed bridge for an optional generated planner."""
+    name = "ephemeral"
+
+    def __init__(self, planner: Any) -> None:
+        self.planner = planner
+
+    async def plan(self, targets: list[dict[str, Any]], context: dict[str, Any]) -> ProbePlan:
+        return await self.planner.plan(targets, context)
 
 
 class TestingAgent:
@@ -238,14 +253,23 @@ class TestingAgent:
             )
             return []
 
-        if not await self.client.available():
+        model_available = await self.client.available()
+        if not model_available:
             logger.warning(
-                "AI testing skipped: %s unreachable at %s "
-                "(start Ollama and pull the testing model, e.g. `ollama pull qwen3:4b`)",
-                self.config.provider,
-                self.config.base_url,
+                "AI provider/model unavailable at %s (%s); using bounded deterministic probes",
+                self.config.base_url, self.client.availability_error or "health check failed",
             )
-            return []
+
+        # Discard stale checkpoint endpoints from a previous scope/target.
+        # Otherwise a resumed phase can contain only out-of-scope URLs and
+        # appear to have "no interesting endpoints" forever.
+        if self.scope:
+            current = list(getattr(scan_state, "endpoints", []) or [])
+            in_scope = [ep for ep in current if self.scope.is_in_scope(str(ep.get("url", "")))]
+            if not in_scope:
+                scan_state.endpoints = []
+            elif len(in_scope) != len(current):
+                scan_state.endpoints = in_scope
 
         # Ensure phase-only runs have seed targets
         seeded = self.seed_targets_from_scope(scan_state, self.scope)
@@ -253,6 +277,14 @@ class TestingAgent:
             logger.info("AI testing: seeded %d endpoint(s) for empty scan state", seeded)
 
         targets = self._select_targets(scan_state)
+        # A host-only scope should always yield at least one safe target even
+        # when crawlers return no routes or all routes are low-scoring.
+        if not targets and getattr(scan_state, "endpoints", None):
+            for ep in scan_state.endpoints:
+                url = str(ep.get("url", ""))
+                if url and (not self.scope or self.scope.is_in_scope(url)):
+                    targets = [{"url": url, "method": "GET", "source": ep.get("source", "seed_fallback"), "params": [], "status": ep.get("status", 0)}]
+                    break
         # Planners may only choose discovered or explicitly configured targets;
         # an in-scope URL invented by a model is not enough to execute.
         self._target_urls = {str(target["url"]) for target in targets}
@@ -276,8 +308,28 @@ class TestingAgent:
 
         context = self._compact_context(scan_state)
         await self._control_gate("ai_test:plan")
-        plans = await self._run_subagents(targets, context)
+        monitor = asyncio.create_task(self._token_monitor()) if model_available else None
+        try:
+            plans = await asyncio.wait_for(
+                self._run_subagents(targets, context),
+                timeout=self.config.planner_deadline,
+            ) if model_available else []
+        except asyncio.TimeoutError:
+            logger.warning("AI planning deadline exceeded (%.0fs); cancelling remaining specialists", self.config.planner_deadline)
+            plans = []
+        finally:
+            if monitor:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
+        setattr(scan_state, "ai_token_usage", dict(self.client.usage))
+        logger.info("AI planning tokens: prompt=%d estimated_prompt=%d completion=%d total=%d requests=%d started=%d failed=%d",
+                    self.client.usage["prompt_tokens"], self.client.usage["prompt_tokens_estimated"],
+                    self.client.usage["completion_tokens"], self.client.usage["total_tokens"], self.client.usage["requests"],
+                    self.client.usage["requests_started"], self.client.usage["failed_requests"])
         probes = self._merge_probes(plans)
+        if not probes:
+            probes = self._fallback_probes(targets)
+            logger.info("AI planner fallback: generated %d safe probe(s)", len(probes))
         if not probes:
             logger.info("AI bug hunter: subagents proposed no probes")
             return []
@@ -285,6 +337,40 @@ class TestingAgent:
         logger.info("AI bug hunter executing %d probe(s)", len(probes))
         await self._control_gate("ai_test:execute")
         findings = await self._execute_probes(probes)
+
+        setattr(scan_state, "ai_test_probes", len(probes))
+        setattr(scan_state, "ai_test_findings", len(findings))
+        logger.info("AI bug hunter produced %d finding(s)", len(findings))
+        return findings
+
+    async def _token_monitor(self) -> None:
+        """Emit live model usage while parallel specialists are planning."""
+        try:
+            while True:
+                await asyncio.sleep(5)
+                usage = self.client.usage
+                logger.info("AI live usage: prompt=%d completion=%d total=%d requests=%d",
+                            usage["prompt_tokens"], usage["completion_tokens"],
+                            usage["total_tokens"], usage["requests"])
+        except asyncio.CancelledError:
+            return
+
+    def _fallback_probes(self, targets: list[dict[str, Any]]) -> list[PlannedProbe]:
+        """Generate low-impact probes when an LLM is unavailable or malformed."""
+        probes: list[PlannedProbe] = []
+        for target in targets:
+            url = str(target.get("url", ""))
+            params = list(target.get("params", []) or [])
+            parameter = params[0] if params else "he_probe"
+            probes.append(PlannedProbe(
+                url=url, method="GET", parameter=parameter,
+                payload="he_canary_7f3a", location="query", check="reflect",
+                rationale="Deterministic canary used when model planning is unavailable.",
+                severity_hint="low", vuln_class="xss",
+            ))
+            if len(probes) >= self.config.max_total_probes:
+                break
+        return [p for p in probes if self.scope is None or self.scope.is_in_scope(p.url)]
 
     async def _control_gate(self, label: str) -> None:
         """Cooperative pause/quit controller used by the testing agent."""
@@ -299,11 +385,6 @@ class TestingAgent:
             raise ScanStopped("quit", message=f"Quit during {label}")
         if action == ControlAction.ABORT:
             raise ScanStopped("abort", message=f"Abort during {label}")
-
-        setattr(scan_state, "ai_test_probes", len(probes))
-        setattr(scan_state, "ai_test_findings", len(findings))
-        logger.info("AI bug hunter produced %d finding(s)", len(findings))
-        return findings
 
     # ── Target selection ──────────────────────────────────────────────────
 
@@ -396,6 +477,8 @@ class TestingAgent:
             "tech": tech_summary,
             "graphql": (getattr(scan_state, "graphql_schemas", []) or [])[:5],
             "knowledge": self._knowledge_context(scan_state),
+            "behavior_model": getattr(scan_state, "behavior_model", {}) or {},
+            "learning_events": (getattr(scan_state, "learning_events", []) or [])[-20:],
         }
 
     def _knowledge_context(self, scan_state: Any) -> list[dict]:
@@ -420,6 +503,10 @@ class TestingAgent:
                 logger.warning("Unknown testing subagent: %s", name)
                 continue
             agents.append(cls(self.client, max_probes=self.config.max_probes_per_agent))
+
+        if self.config.generated_agent:
+            from ai.ephemeral_agent import EphemeralAgentPlanner
+            agents.append(EphemeralAgentAdapter(EphemeralAgentPlanner(self.client, max_probes=4)))
 
         if not agents:
             return []

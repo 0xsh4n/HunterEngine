@@ -13,6 +13,7 @@ import logging
 import shutil
 import tempfile
 import re
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +53,14 @@ class LiveProber:
         """
         if not hostnames:
             return []
+        # Accept hostnames, URLs, and host:port values uniformly.
+        normalized = []
+        for value in hostnames:
+            raw = str(value).strip()
+            host = urlparse(raw).hostname if "://" in raw else raw.split("/", 1)[0].split(":", 1)[0]
+            if host:
+                normalized.append(host)
+        hostnames = list(dict.fromkeys(normalized))
 
         if self._has_httpx:
             return await self._probe_httpx(hostnames)

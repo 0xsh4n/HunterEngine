@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -109,6 +110,8 @@ class HunterSubagent(ABC):
                 "Return compact JSON only.",
             ],
             "scan_context": context,
+            "application_behavior": context.get("behavior_model", {}),
+            "instruction": "Explain which observed application behavior makes each probe relevant; do not invent routes or auth mechanisms.",
             "targets": targets,
         }
         user = json.dumps(user_payload, ensure_ascii=True, default=str)
@@ -117,12 +120,16 @@ class HunterSubagent(ABC):
             user = user[:5500]
 
         try:
-            data = await self.client.chat_json(
-                system=self.system_prompt(),
-                user=user,
+            # A slow/unreachable model must not stall an entire scan. Bound
+            # each specialist call independently; the caller can use the
+            # deterministic fallback planner when this returns empty.
+            timeout = min(float(getattr(self.client.config, "timeout", 20.0)), 20.0)
+            data = await asyncio.wait_for(
+                self.client.chat_json(system=self.system_prompt(), user=user),
+                timeout=max(3.0, timeout),
             )
         except Exception as exc:
-            logger.warning("%s planning failed: %s", self.name, exc)
+            logger.warning("%s planning failed (%s): %s", self.name, type(exc).__name__, str(exc) or "no response")
             return ProbePlan(agent=self.name)
 
         if not data:

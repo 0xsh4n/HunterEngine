@@ -3,15 +3,16 @@
 # This file enforces scope boundaries for all modules.
 
 program:
-  name: "APP NAME"
-  platform: "Source of program"           # hackerone | bugcrowd | private
-  url: ""                         # Program URL for reference
+  name: "Intuitor"
+  platform: "Internal Pentesting"           # hackerone | bugcrowd | private
+  url: "https://intuitorit.com"                         # Program URL for reference
 
 in_scope:
-  domains:
-    - "example.com"
+  domains: []
   cidrs: []                       # e.g. "10.0.0.0/8"
-  urls: []                        # Specific URL paths to include
+  urls:
+    - "https://trackswift.brainapp.in"                        # Specific URL paths to include
+    - "https://brainapp.in"
 
 out_of_scope:
   domains:

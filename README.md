@@ -22,7 +22,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
-  <img src="https://img.shields.io/badge/version-3.0.0-orange?style=flat-square" alt="Version 3.0.0">
+  <img src="https://img.shields.io/badge/version-3.1.0-orange?style=flat-square" alt="Version 3.1.0">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square" alt="Platform">
 </p>
 
@@ -67,38 +67,66 @@ Classic detectors, correlation, local AI triage, and multi-format reports still 
 
 ---
 
-## Architecture (v3)
+## Architecture (v3.1)
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        HunterEngine v3.0.0                          │
-├─────────────────────────────────────────────────────────────────────┤
-│  ScopeLoader                                                        │
-│       │                                                             │
-│       ▼                                                             │
-│  ┌──────────────┐   ┌─────────────────┐   ┌────────────────────┐  │
-│  │ ReconAgent   │──▶│ ActiveReconAgent│──▶│ EnumerationAgent   │  │
-│  │ • subdomains │   │ • PD httpx probe│   │ • katana/gospider  │  │
-│  │ • DNS        │   │ • tech FP       │   │ • auto-navigator   │  │
-│  │ • historical │   │                 │   │ • JS / GraphQL     │  │
-│  └──────────────┘   └─────────────────┘   └─────────┬──────────┘  │
-│                                                      │             │
-│                                                      ▼             │
-│                                           ┌────────────────────┐   │
-│                                           │   VulnHuntAgent    │   │
-│                                           │  (ai_test phase)   │   │
-│                                           │  ┌─────┐ ┌─────┐   │   │
-│                                           │  │IDOR │ │SSTI │ … │   │
-│                                           │  │XSS  │ │Smug │   │   │
-│                                           │  └─────┘ └─────┘   │   │
-│                                           └─────────┬──────────┘   │
-│                                                     ▼              │
-│  Detect → Correlate → AI Triage (reporting) → Report               │
-│  Core: Rate Limiter · WAF Bypass · Proxy · Browser · Sessions      │
-└─────────────────────────────────────────────────────────────────────┘
-```
+┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   HUNTERENGINE v3.1                                             │
+├──────────────────────────────────────────────────────────────────────────────────────────────┤
+│  INPUT / SAFETY                                                                                 │
+│  scope.yaml + --target ──▶ ScopeLoader ──▶ URL/host normalization ──▶ out-of-scope filters    │
+│                                  │                                                               │
+│                                  ├── black-box / grey-box policy                                │
+│                                  ├── method, response, request and host budgets                 │
+│                                  └── rate limiter · proxy · session manager · circuit breakers  │
+│                                                                                                 │
+│  DISCOVERY                                                                                      │
+│  ┌────────────────────┐   ┌─────────────────────┐   ┌──────────────────────────────────────┐  │
+│  │ ReconAgent         │──▶│ ActiveReconAgent    │──▶│ EnumerationAgent                     │  │
+│  │ • subdomains       │   │ • HTTP probing      │   │ • browser/auto-crawl                 │  │
+│  │ • DNS resolution   │   │ • redirects/status  │   │ • JS and API routes                  │  │
+│  │ • historical URLs  │   │ • tech fingerprint   │   │ • GraphQL mapping and params         │  │
+│  └────────────────────┘   └─────────────────────┘   └───────────────────┬──────────────────┘  │
+│                                                                         │                     │
+│  APPLICATION UNDERSTANDING                                              ▼                     │
+│  ┌─────────────────────────────┐   ┌──────────────────────────────┐   ┌───────────────────┐ │
+│  │ Behavior model              │   │ Local RAG data pool           │   │ Endpoint memory   │ │
+│  │ • auth/session/JWT/OAuth    │──▶│ • PDFs, blogs, HTML, text     │──▶│ • params/routes   │ │
+│  │ • signup candidates         │   │ • lexical retrieval           │   │ • prior signals   │ │
+│  │ • app flow hypotheses       │   │ • evidence-backed context    │   │ • learning events │ │
+│  └─────────────────────────────┘   └──────────────────────────────┘   └─────────┬─────────┘ │
+│                                                                                   │           │
+│  AI REASONING / VALIDATION                                                       ▼           │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐ │
+│  │ AgenticPlanner ranks targets and explains decisions                                      │ │
+│  │        │                                                                                 │ │
+│  │        ▼                                                                                 │ │
+│  │ VulnHuntAgent ──▶ XSS · IDOR · SSTI · SSRF · Auth · CORS · JWT · Redirect · Smuggling   │ │
+│  │        │             │                                                                   │ │
+│  │        │             └── optional ephemeral AI planner (structured plans only)           │ │
+│  │        ▼                                                                                 │ │
+│  │ Probe merge ──▶ scope gate ──▶ method gate ──▶ rate/budget gate ──▶ safe HTTP probe     │ │
+│  │        ▲                                      │                                           │ │
+│  │        └──── model timeout/malformed output ──┴── deterministic fallback canaries         │ │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                                 │
+│  DETECTION / FEEDBACK / OUTPUT                                                                  │
+│  Classic detectors ──▶ weak signals ──▶ correlation/chaining ──▶ AI triage ──▶ reports        │
+│          │                    │                  │                     │                        │
+│          └──────────────▶ learning events + token usage + phase health ◀─────────────────────┘
+│                                                                                                 │
+│  REPORT ARTIFACTS: reports/<scope>/summary + one HTML page per finding + evidence/ screenshots  │
+│  CHECKPOINTS: resumable state, behavior model, decisions, errors, learning events, AI tokens   │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+``` 
 
 **Pipeline phases:** `recon` → `active_recon` → `crawl`/`enumeration` → `ai_test` → `detect` → `correlate` → `ai` → `report`
+
+The model is deliberately not the authority for traffic: it proposes and
+explains hypotheses, while deterministic scope and safety gates decide whether
+anything can be sent. If the model is unavailable, the same pipeline continues
+with bounded non-destructive fallback probes and records the degraded mode in
+phase health and checkpoints.
 
 ---
 
@@ -150,6 +178,20 @@ out_of_scope:
     - "delete"
     - "password_reset"
 ```
+
+For a single subdomain or URL, use URL scope entries; URL-only scopes do not
+trigger whole-domain enumeration:
+
+```yaml
+in_scope:
+  domains: []
+  urls:
+    - "https://app.target.com/account/profile"
+```
+
+For large scopes, keep wildcard domains and tune `recon.concurrency` and
+`recon.max_root_domains`. Enumeration and probing are isolated per target so a
+failed host does not abort the remaining assessment.
 
 ### Run
 
@@ -460,6 +502,124 @@ Copy `.env.example` → `.env` for optional `OLLAMA_BASE_URL` / proxy overrides.
 ---
 
 ## Contributing
+
+## Operational guide (current)
+
+### Scope modes
+
+`config/scope.yaml` is the persistent source of truth. Use exactly one of these
+patterns for a focused assessment:
+
+```yaml
+# Entire authorized domain and subdomains
+in_scope:
+  domains: ["*.example.com"]
+  urls: []
+
+# One subdomain or one application URL (survives a reboot)
+in_scope:
+  domains: []
+  urls:
+    - "https://app.example.com/login"
+```
+
+URL entries match HTTP/HTTPS redirect variants, query-string variants, and
+descendant paths. They do not trigger whole-parent-domain enumeration. A
+one-off target can be supplied without editing the file:
+
+```bash
+python main.py scan --target https://app.example.com/login
+python main.py scan --target app.example.com
+```
+
+`--target` is runtime-only; edit `config/scope.yaml` when the target must be
+retained after restarting the process. The current checked-in scope is a
+single URL scope for `https://testphp.vulnweb.com`; its `domains: []` and URL
+entry are intentional. Only use it where you have authorization.
+
+### Recommended workflows
+
+```bash
+# Full large-scope assessment
+python main.py scan --profile blackbox --auto-crawl
+
+# Focused single application assessment
+python main.py scan --target https://app.example.com --profile blackbox
+
+# Resume after interruption/reboot
+python main.py scan --resume
+
+# Run phases independently
+python main.py scan --phase recon
+python main.py scan --phase active_recon
+python main.py scan --phase crawl
+python main.py scan --phase ai_test
+python main.py scan --phase detect
+python main.py scan --phase report
+```
+
+For grey-box work, use only written authorization and configure the permitted
+authentication material explicitly. State-changing methods and account
+creation remain disabled by default. Synthetic credential generation exists
+for authorized lab workflows, but HunterEngine does not silently register
+accounts or submit signup forms.
+
+### AI, behavior analysis, and learning
+
+The AI testing phase combines specialist planning with deterministic safeguards.
+Before probing, it ranks endpoints, identifies likely authentication mechanisms
+(session, token/JWT, OAuth/SSO), finds signup candidates, and retrieves relevant
+RAG chunks. Each phase records success/failure telemetry and carries recent
+learning events into later AI prompts. Model failures are isolated per agent;
+scope, rate limits, request budgets, and circuit breakers remain authoritative.
+Scan output includes prompt, completion, total-token, and request counts for the
+testing model; usage is persisted in checkpoints. For unusual applications,
+`ai.testing.generated_agent: true` enables an ephemeral planner that returns
+the same structured probe format as built-in agents. Generated code is treated
+as text only and is never imported or executed; every probe still passes the
+deterministic safety gate.
+
+### Local RAG data pool
+
+```bash
+python main.py knowledge-ingest ./research
+python main.py knowledge-ingest ./security-guide.pdf
+python main.py knowledge-search "authentication session fixation"
+```
+
+The index is stored at `data/knowledge/index.json` and can be rebuilt at any
+time. PDF, Markdown, text, HTML, and blog exports are supported. RAG content
+is advisory context, never permission to test a target.
+
+### Reports and evidence
+
+Reports are written under a sanitized scope/program folder. Every finding gets
+its own HTML page. Existing screenshots from browser crawling, Eyewitness, or
+Gowitness are copied into the scope's `evidence/` folder and embedded in the
+finding page. Missing images do not fail report generation.
+
+```text
+data/reports/<scope>/
+├── report_<timestamp>.html
+├── report_<timestamp>.md
+├── 001_finding-title.html
+└── evidence/
+```
+
+Configure external evidence directories under `reporting.evidence_dirs` in
+`config/settings.yaml`.
+
+### Troubleshooting a target that appears to disappear
+
+1. Confirm `config/scope.yaml` contains a quoted URL under `in_scope.urls`.
+2. Run `python main.py scope` and verify the displayed scope.
+3. Use `python main.py scan --target <url>` to isolate the target.
+4. Run `python main.py scan --phase active_recon` and inspect live-host output.
+5. If a prior scan stopped, use `python main.py scan --resume` or remove only
+   the intended checkpoint after reviewing it.
+
+The loader accepts URL-only scopes after a reboot; no in-memory CLI state is
+required for persisted `scope.yaml` targets.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

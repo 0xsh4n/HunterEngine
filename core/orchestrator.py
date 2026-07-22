@@ -96,6 +96,9 @@ class ScanState:
     # Explainable autonomous planning/health telemetry
     agentic_decisions: list[dict] = field(default_factory=list)
     phase_health: dict[str, dict] = field(default_factory=dict)
+    behavior_model: dict[str, Any] = field(default_factory=dict)
+    learning_events: list[dict] = field(default_factory=list)
+    ai_token_usage: dict[str, int] = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -411,6 +414,7 @@ class Orchestrator:
                     self.state.errors.append(f"{phase.value}: {str(e)}")
                     self.state.errors.append(tb)
                     self.state.phase_health[phase.value] = {"status": "failed", "error": str(e)[:300], "traceback": tb[:4000]}
+                    self.state.learning_events.append({"phase": phase.value, "result": "failure", "error": str(e)[:300]})
                     self._save_checkpoint("error", next_phase=phase.value)
                     # Continue by default: partial results are more useful than
                     # a crash. Strict mode can retain fail-fast behavior.
@@ -419,6 +423,7 @@ class Orchestrator:
                         raise
                 else:
                     self.state.phase_health[phase.value] = {"status": "ok", "elapsed": round(time.time() - phase_start, 2)}
+                    self.state.learning_events.append({"phase": phase.value, "result": "success", "elapsed": round(time.time() - phase_start, 2)})
 
                 elapsed = time.time() - phase_start
                 logger.info(f"═══ Phase {phase.value} completed in {elapsed:.1f}s ═══")
@@ -487,7 +492,9 @@ class Orchestrator:
         """Vuln hunt agent: nested IDOR / SSTI / smuggling / XSS / … hunters."""
         from ai.agents import VulnHuntAgent
         from ai.agentic import AgenticPlanner
+        from ai.behavior import analyze_behavior
 
+        analyze_behavior(self.state)
         AgenticPlanner(self.profile or "blackbox").apply(self.state)
 
         await VulnHuntAgent(self._agent_context()).run(self.state)
@@ -601,6 +608,7 @@ class Orchestrator:
             "errors": len(self.state.errors),
             "profile": self.profile or "blackbox",
             "agentic_decisions": len(self.state.agentic_decisions),
+            "ai_token_usage": self.state.ai_token_usage,
             "phase_health": self.state.phase_health,
             "rate_limiter": self.rate_limiter.get_stats() if self.rate_limiter else {},
         }

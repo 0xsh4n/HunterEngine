@@ -112,6 +112,7 @@ def print_banner() -> None:
 
 @app.command()
 def scan(
+    target: str = typer.Option("", "--target", help="Single authorized URL or subdomain (overrides scope targets)"),
     scope: str = typer.Option("config/scope.yaml", help="Path to scope.yaml"),
     settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
     phase: str = typer.Option(
@@ -163,6 +164,18 @@ def scan(
         )
 
         await orchestrator.setup()
+
+        if target:
+            # Keep single-target runs isolated without rewriting scope.yaml.
+            value = target.strip()
+            if not value.startswith(("http://", "https://")):
+                value = "https://" + value
+            loader = orchestrator.scope_loader
+            if loader:
+                loader.scope.in_scope_domains = []
+                loader.scope.in_scope_urls = [value]
+                loader._compile_patterns()
+                console.print(f"[yellow]Single-target mode:[/yellow] {value}")
 
         if resume or checkpoint:
             cp_path = checkpoint or None
@@ -578,6 +591,14 @@ def print_results(state, elapsed: float) -> None:
         stats_table.add_row("AI enriched findings", str(getattr(state_obj, "ai_enriched_findings", 0)))
         stats_table.add_row("AI test probes", str(getattr(state_obj, "ai_test_probes", 0)))
         stats_table.add_row("AI test findings", str(getattr(state_obj, "ai_test_findings", 0)))
+        token_usage = getattr(state_obj, "ai_token_usage", {}) or {}
+        stats_table.add_row("AI prompt tokens", str(token_usage.get("prompt_tokens", 0)))
+        stats_table.add_row("AI prompt tokens (estimated)", str(token_usage.get("prompt_tokens_estimated", 0)))
+        stats_table.add_row("AI completion tokens", str(token_usage.get("completion_tokens", 0)))
+        stats_table.add_row("AI total tokens", str(token_usage.get("total_tokens", 0)))
+        stats_table.add_row("AI model requests", str(token_usage.get("requests", 0)))
+        stats_table.add_row("AI requests started", str(token_usage.get("requests_started", 0)))
+        stats_table.add_row("AI failed requests", str(token_usage.get("failed_requests", 0)))
         stats_table.add_row("Errors", str(len(errors)))
         console.print(Panel(stats_table, title="Scan Statistics", border_style="green"))
 

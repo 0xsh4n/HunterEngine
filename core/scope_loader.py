@@ -65,7 +65,9 @@ class ScopeLoader:
         if not self.scope_path.exists():
             raise FileNotFoundError(f"Scope file not found: {self.scope_path}")
 
-        raw = yaml.safe_load(self.scope_path.read_text())
+        raw = yaml.safe_load(self.scope_path.read_text()) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"Scope file must contain a YAML mapping: {self.scope_path}")
 
         program = raw.get("program", {})
         self.scope.program_name = program.get("name", "")
@@ -128,7 +130,7 @@ class ScopeLoader:
         if self._is_out_of_scope_cidr(host):
             return False
 
-        return self._is_in_scope_domain(host) or self._is_in_scope_cidr(host)
+        return self._is_in_scope_domain(host) or self._is_in_scope_cidr(host) or self._is_in_scope_url(url_or_host)
 
     def filter_in_scope(self, urls: list[str]) -> list[str]:
         """Filter a list of URLs to only those in scope."""
@@ -157,6 +159,28 @@ class ScopeLoader:
     def _is_out_of_scope_url(self, url: str) -> bool:
         for pattern in self.scope.out_of_scope_urls:
             if fnmatch.fnmatch(url, pattern):
+                return True
+        return False
+
+    def _is_in_scope_url(self, url: str) -> bool:
+        # Match explicit URL scopes across http/https redirects and the common
+        # trailing-slash/query variants. A host-only URL entry scopes that host;
+        # a path entry scopes that path and its descendants.
+        candidate = urlparse(url if "://" in url else f"https://{url}")
+        for raw in self.scope.in_scope_urls:
+            pattern = str(raw).strip()
+            if not pattern:
+                continue
+            if fnmatch.fnmatch(url, pattern):
+                return True
+            parsed = urlparse(pattern if "://" in pattern else f"https://{pattern}")
+            if not parsed.hostname or (candidate.hostname or "").lower() != parsed.hostname.lower():
+                continue
+            configured_path = parsed.path.rstrip("/")
+            candidate_path = candidate.path.rstrip("/")
+            if not configured_path or configured_path == "/":
+                return True
+            if candidate_path == configured_path or candidate_path.startswith(configured_path + "/"):
                 return True
         return False
 
@@ -191,7 +215,29 @@ class ScopeLoader:
             ext = tldextract.extract(clean)
             if ext.domain and ext.suffix:
                 roots.add(f"{ext.domain}.{ext.suffix}")
+        # URL-only and single-subdomain scopes previously produced no roots.
+        for raw in self.scope.in_scope_urls:
+            host = self._extract_host(str(raw))
+            if host:
+                roots.add(host)
+        # Accept a plain hostname in `domains` without requiring a registrable
+        # suffix (useful for localhost, testphp, and private lab targets).
+        for d in self.scope.in_scope_domains:
+            clean = str(d).lstrip("*.").strip()
+            if clean and "." not in clean:
+                roots.add(clean)
         return sorted(roots)
+
+    def get_seed_urls(self) -> list[str]:
+        """Return normalized URL seeds for URL-only/single-target scopes."""
+        urls: list[str] = []
+        for raw in self.scope.in_scope_urls:
+            value = str(raw).strip()
+            if value.startswith(("http://", "https://")):
+                urls.append(value)
+            elif value:
+                urls.append("https://" + value)
+        return list(dict.fromkeys(urls))
 
     def get_auth_headers(self) -> dict[str, str]:
         """Build auth headers based on scope auth config."""
@@ -218,6 +264,7 @@ class ScopeLoader:
         lines = [
             f"Program: {self.scope.program_name} ({self.scope.platform})",
             f"In-scope domains: {', '.join(self.scope.in_scope_domains) or 'none'}",
+            f"In-scope URLs: {', '.join(self.scope.in_scope_urls) or 'none'}",
             f"In-scope CIDRs: {', '.join(self.scope.in_scope_cidrs) or 'none'}",
             f"Out-of-scope domains: {', '.join(self.scope.out_of_scope_domains) or 'none'}",
             f"Out-of-scope keywords: {', '.join(self.scope.out_of_scope_keywords) or 'none'}",

@@ -70,6 +70,22 @@ class OllamaClient:
 
     def __init__(self, config: OllamaClientConfig) -> None:
         self.config = config
+        self.usage = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "requests": 0, "requests_started": 0, "failed_requests": 0,
+            "prompt_tokens_estimated": 0,
+        }
+        self.availability_error = ""
+
+    def _record_usage(self, data: dict[str, Any]) -> None:
+        """Accumulate provider usage fields across concurrent specialist calls."""
+        usage = data.get("usage", {}) if isinstance(data, dict) else {}
+        prompt = usage.get("prompt_tokens", data.get("prompt_eval_count", 0)) or 0
+        completion = usage.get("completion_tokens", data.get("eval_count", 0)) or 0
+        self.usage["prompt_tokens"] += int(prompt)
+        self.usage["completion_tokens"] += int(completion)
+        self.usage["total_tokens"] += int(usage.get("total_tokens", int(prompt) + int(completion)) or 0)
+        self.usage["requests"] += 1
 
     def headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -87,8 +103,27 @@ class OllamaClient:
         try:
             async with httpx.AsyncClient(timeout=min(self.config.timeout, 3.0)) as client:
                 response = await client.get(health, headers=self.headers())
-            return response.status_code < 500
-        except Exception:
+            if response.status_code >= 500:
+                self.availability_error = f"HTTP {response.status_code} from {health}"
+                return False
+                if provider == "ollama" and response.status_code == 200:
+                    # A healthy daemon without the configured model cannot answer
+                    # planner calls; detect this before launching nine timeouts.
+                    try:
+                        models = response.json().get("models", [])
+                        names = {str(row.get("name", "")) for row in models if isinstance(row, dict)}
+                        if not names:
+                            self.availability_error = "Ollama is running but returned no models"
+                            return False
+                        if not any(self.config.model == name or self.config.model.split(":")[0] == name.split(":")[0] for name in names):
+                            self.availability_error = f"Configured model not installed: {self.config.model}"
+                            return False
+                    except (ValueError, TypeError, AttributeError):
+                        self.availability_error = "Ollama /api/tags returned invalid JSON"
+                        return False
+                return response.status_code < 500
+        except Exception as exc:
+            self.availability_error = f"{type(exc).__name__}: {exc}"
             return False
 
     async def chat(
@@ -100,12 +135,18 @@ class OllamaClient:
         think: Optional[ThinkValue] = None,
     ) -> str:
         """Return assistant content (thinking traces are stripped / kept separate)."""
+        self.usage["requests_started"] += 1
+        self.usage["prompt_tokens_estimated"] += max(1, (len(system) + len(user)) // 4)
         provider = self.config.provider.lower().strip()
-        if provider == "ollama":
-            return await self._chat_ollama(system=system, user=user, json_mode=json_mode, think=think)
-        if provider in {"openai-compatible", "openai_compatible", "lmstudio", "llama.cpp"}:
-            return await self._chat_openai(system=system, user=user, json_mode=json_mode)
-        raise ValueError(f"Unsupported local AI provider: {self.config.provider}")
+        try:
+            if provider == "ollama":
+                return await self._chat_ollama(system=system, user=user, json_mode=json_mode, think=think)
+            if provider in {"openai-compatible", "openai_compatible", "lmstudio", "llama.cpp"}:
+                return await self._chat_openai(system=system, user=user, json_mode=json_mode)
+            raise ValueError(f"Unsupported local AI provider: {self.config.provider}")
+        except Exception:
+            self.usage["failed_requests"] += 1
+            raise
 
     async def chat_json(
         self,
@@ -152,6 +193,7 @@ class OllamaClient:
                 return await self._generate_ollama(system=system, user=user, json_mode=json_mode)
             response.raise_for_status()
             data = response.json()
+            self._record_usage(data)
 
         message = data.get("message", {}) or {}
         content = message.get("content", "") or ""
@@ -176,6 +218,7 @@ class OllamaClient:
             response = await client.post(url, json=payload, headers=self.headers())
             response.raise_for_status()
             data = response.json()
+            self._record_usage(data)
         return strip_thinking(data.get("response", "") or "")
 
     async def _chat_openai(self, *, system: str, user: str, json_mode: bool) -> str:
@@ -201,6 +244,7 @@ class OllamaClient:
             response = await client.post(url, json=payload, headers=self.headers())
             response.raise_for_status()
             data = response.json()
+            self._record_usage(data)
         choices = data.get("choices", [])
         if not choices:
             return ""

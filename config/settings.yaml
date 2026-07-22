@@ -14,6 +14,10 @@ general:
 # configured auth headers only when safety.active_testing.greybox_authorized=true.
 testing:
   profile: "blackbox"
+  account_testing:
+    enabled: false             # Generation/submission requires explicit authorization
+    submit_signup: false       # Never enable against production without written scope
+    email_domain: "example.invalid"
 
 knowledge:
   enabled: true
@@ -78,6 +82,8 @@ waf_bypass:
 
 recon:
   subdomain_threads: 10
+  concurrency: 10
+  max_root_domains: 5000
   dns_wordlist: "config/wordlists/subdomains.txt"
   resolve_all: true
   port_scan_top: 1000             # Top N ports to scan
@@ -123,14 +129,14 @@ ai:
   redact_sensitive: true
   # Reporting / triage model (used when mode is triage or both)
   local_model:
-    base_url: "http://127.0.0.1:11434"
-    model: "hf.co/entrick/Security-SLM-Gemma-4-E2B-it-GGUF:Q4_K_M"
+    base_url: "http://10.3.20.55:11434"
+    model: "qwen3:4b"
     timeout: 45
     temperature: 0.1
     api_key_env: ""
   # Testing / bug-hunt model — Qwen3 4B with reasoning (Ollama think)
   testing_model:
-    base_url: "http://127.0.0.1:11434"
+    base_url: "http://10.3.20.55:11434"
     model: "qwen3:4b"
     timeout: 90
     temperature: 0.2
@@ -140,6 +146,8 @@ ai:
     api_key_env: ""
   testing:
     enabled: true                 # Also implied when mode is testing/both
+    generated_agent: false        # Optional ephemeral AI planner; generated code is never executed
+    planner_deadline: 25          # Overall seconds for all specialist planning before fallback
     concurrency: 3                # Parallel subagents + probes
     max_endpoints: 40             # Ranked endpoints fed to the hunters
     max_probes_per_agent: 8
