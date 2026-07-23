@@ -33,9 +33,21 @@ class HunterEngineTools:
     """
 
     def __init__(self, settings_path: str = DEFAULT_SETTINGS, scope_path: str = DEFAULT_SCOPE) -> None:
-        self.settings_path = settings_path
-        self.scope_path = scope_path
+        # MCP clients launch the server with an arbitrary working directory, so
+        # anchor any relative config path at the project root — otherwise
+        # `config/scope.yaml` resolves against the client's cwd and vanishes.
+        self.settings_path = self._resolve(settings_path)
+        self.scope_path = self._resolve(scope_path)
         self._scan_manager: Any = None
+
+    @staticmethod
+    def _resolve(path: str) -> str:
+        p = Path(path)
+        if p.is_absolute():
+            return str(p)
+        anchored = ROOT / p
+        # Prefer the root-anchored path when it exists; else fall back to cwd.
+        return str(anchored if anchored.exists() else (p if p.exists() else anchored))
 
     # ── lazy singletons ───────────────────────────────────────────────────
     @property
