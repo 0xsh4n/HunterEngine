@@ -70,14 +70,24 @@ class OllamaClientConfig:
 class OllamaClient:
     """Thin async client over Ollama native API (preferred) or OpenAI-compatible."""
 
+    # Keep only the most recent reasoning traces so memory stays bounded even
+    # during long scans that make hundreds of specialist calls.
+    MAX_TRACES = 200
+
     def __init__(self, config: OllamaClientConfig) -> None:
         self.config = config
         self.usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
             "requests": 0, "requests_started": 0, "failed_requests": 0,
-            "prompt_tokens_estimated": 0,
+            "prompt_tokens_estimated": 0, "thinking_chars": 0,
+            "total_duration_ms": 0,
         }
         self.availability_error = ""
+        # Captured chain-of-thought / reasoning traces (Qwen3 <think> or the
+        # Ollama native ``thinking`` field). Retained instead of discarded so
+        # the reasoner and dashboard can surface *why* the model decided.
+        self.reasoning_traces: list[dict[str, Any]] = []
+        self.last_thinking: str = ""
 
     def _record_usage(self, data: dict[str, Any]) -> None:
         """Accumulate provider usage fields across concurrent specialist calls."""
@@ -88,6 +98,32 @@ class OllamaClient:
         self.usage["completion_tokens"] += int(completion)
         self.usage["total_tokens"] += int(usage.get("total_tokens", int(prompt) + int(completion)) or 0)
         self.usage["requests"] += 1
+        # Ollama reports wall-clock nanoseconds; normalize to ms for the UI.
+        total_ns = data.get("total_duration") if isinstance(data, dict) else None
+        if isinstance(total_ns, (int, float)) and total_ns > 0:
+            self.usage["total_duration_ms"] += int(total_ns / 1_000_000)
+
+    def _capture_thinking(self, thinking: str, *, label: str = "") -> None:
+        """Store a reasoning trace, keeping the buffer bounded."""
+        thinking = (thinking or "").strip()
+        if not thinking:
+            return
+        self.last_thinking = thinking
+        self.usage["thinking_chars"] += len(thinking)
+        self.reasoning_traces.append({
+            "label": label or self.config.model,
+            "model": self.config.model,
+            "text": thinking[:4000],
+            "ts": time.time(),
+        })
+        if len(self.reasoning_traces) > self.MAX_TRACES:
+            del self.reasoning_traces[: len(self.reasoning_traces) - self.MAX_TRACES]
+
+    def drain_traces(self) -> list[dict[str, Any]]:
+        """Return captured reasoning traces and clear the buffer."""
+        traces = list(self.reasoning_traces)
+        self.reasoning_traces.clear()
+        return traces
 
     def headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -182,6 +218,7 @@ class OllamaClient:
         user: str,
         json_mode: bool = True,
         think: Optional[ThinkValue] = None,
+        label: str = "",
     ) -> str:
         """Return assistant content (thinking traces are stripped / kept separate)."""
         self.usage["requests_started"] += 1
@@ -189,9 +226,11 @@ class OllamaClient:
         provider = self.config.provider.lower().strip()
         try:
             if provider == "ollama":
-                return await self._chat_ollama(system=system, user=user, json_mode=json_mode, think=think)
+                return await self._chat_ollama(
+                    system=system, user=user, json_mode=json_mode, think=think, label=label
+                )
             if provider in {"openai-compatible", "openai_compatible", "lmstudio", "llama.cpp"}:
-                return await self._chat_openai(system=system, user=user, json_mode=json_mode)
+                return await self._chat_openai(system=system, user=user, json_mode=json_mode, label=label)
             raise ValueError(f"Unsupported local AI provider: {self.config.provider}")
         except Exception:
             self.usage["failed_requests"] += 1
@@ -203,8 +242,9 @@ class OllamaClient:
         system: str,
         user: str,
         think: Optional[ThinkValue] = None,
+        label: str = "",
     ) -> Optional[dict[str, Any]]:
-        content = await self.chat(system=system, user=user, json_mode=True, think=think)
+        content = await self.chat(system=system, user=user, json_mode=True, think=think, label=label)
         return parse_json_object(content)
 
     async def _chat_ollama(
@@ -214,6 +254,7 @@ class OllamaClient:
         user: str,
         json_mode: bool,
         think: Optional[ThinkValue],
+        label: str = "",
     ) -> str:
         url = self.config.base_url.rstrip("/") + "/api/chat"
         think_value = self.config.think if think is None else think
@@ -239,17 +280,22 @@ class OllamaClient:
             response = await client.post(url, json=payload, headers=self.headers())
             if response.status_code in (400, 404):
                 # Older Ollama / non-chat models: fall back without think
-                return await self._generate_ollama(system=system, user=user, json_mode=json_mode)
+                return await self._generate_ollama(
+                    system=system, user=user, json_mode=json_mode, label=label
+                )
             response.raise_for_status()
             data = response.json()
             self._record_usage(data)
 
         message = data.get("message", {}) or {}
         content = message.get("content", "") or ""
-        # Some builds leave thinking markers in content — strip them
-        return strip_thinking(content)
+        # Newer Ollama returns reasoning in a dedicated ``thinking`` field;
+        # older builds leave <think> markers inside content. Capture both.
+        embedded, clean = extract_thinking(content)
+        self._capture_thinking(str(message.get("thinking") or "") or embedded, label=label)
+        return clean
 
-    async def _generate_ollama(self, *, system: str, user: str, json_mode: bool) -> str:
+    async def _generate_ollama(self, *, system: str, user: str, json_mode: bool, label: str = "") -> str:
         url = self.config.base_url.rstrip("/") + "/api/generate"
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -268,9 +314,12 @@ class OllamaClient:
             response.raise_for_status()
             data = response.json()
             self._record_usage(data)
-        return strip_thinking(data.get("response", "") or "")
+        thinking = str(data.get("thinking") or "")
+        embedded, clean = extract_thinking(data.get("response", "") or "")
+        self._capture_thinking(thinking or embedded, label=label)
+        return clean
 
-    async def _chat_openai(self, *, system: str, user: str, json_mode: bool) -> str:
+    async def _chat_openai(self, *, system: str, user: str, json_mode: bool, label: str = "") -> str:
         url = self.config.base_url.rstrip("/") + "/v1/chat/completions"
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -297,7 +346,11 @@ class OllamaClient:
         choices = data.get("choices", [])
         if not choices:
             return ""
-        return strip_thinking(choices[0].get("message", {}).get("content", "") or "")
+        msg = choices[0].get("message", {}) or {}
+        # Some OpenAI-compatible servers (vLLM/SGLang) expose reasoning_content.
+        embedded, clean = extract_thinking(msg.get("content", "") or "")
+        self._capture_thinking(str(msg.get("reasoning_content") or "") or embedded, label=label)
+        return clean
 
 
 def _parse_think(value: Any) -> Optional[ThinkValue]:
@@ -316,13 +369,30 @@ def _parse_think(value: Any) -> Optional[ThinkValue]:
     return True
 
 
+_THINK_BLOCK = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", flags=re.DOTALL | re.IGNORECASE)
+
+
+def extract_thinking(text: str) -> tuple[str, str]:
+    """Split leaked ``<think>`` blocks out of content.
+
+    Returns ``(thinking, clean_content)``. Handles an unterminated opening
+    ``<think>`` (streamed / truncated output) by treating the remainder as
+    reasoning so half a JSON object never leaks into a finding.
+    """
+    if not text:
+        return "", ""
+    thoughts = [m.group(1).strip() for m in _THINK_BLOCK.finditer(text)]
+    cleaned = _THINK_BLOCK.sub("", text)
+    open_tag = re.search(r"<think(?:ing)?>", cleaned, flags=re.IGNORECASE)
+    if open_tag:
+        thoughts.append(cleaned[open_tag.end():].strip())
+        cleaned = cleaned[: open_tag.start()]
+    return "\n\n".join(t for t in thoughts if t).strip(), cleaned.strip()
+
+
 def strip_thinking(text: str) -> str:
     """Remove Qwen-style thinking blocks if they leaked into content."""
-    if not text:
-        return ""
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    cleaned = re.sub(r"<thinking>.*?</thinking>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-    return cleaned.strip()
+    return extract_thinking(text)[1]
 
 
 def parse_json_object(content: str) -> Optional[dict[str, Any]]:

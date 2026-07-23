@@ -74,6 +74,9 @@ def serialize_state(state: Any) -> dict[str, Any]:
         "behavior_model": dict(getattr(state, "behavior_model", {}) or {}),
         "learning_events": list(getattr(state, "learning_events", []) or [])[-500:],
         "ai_token_usage": dict(getattr(state, "ai_token_usage", {}) or {}),
+        "ai_reasoning_traces": list(getattr(state, "ai_reasoning_traces", []) or [])[-300:],
+        "ai_reasoning_summary": dict(getattr(state, "ai_reasoning_summary", {}) or {}),
+        "impact_assessments": list(getattr(state, "impact_assessments", []) or [])[-100:],
     }
 
 
@@ -182,6 +185,9 @@ class CheckpointStore:
         state.behavior_model = dict(blob.get("behavior_model") or {})
         state.learning_events = list(blob.get("learning_events") or [])
         state.ai_token_usage = dict(blob.get("ai_token_usage") or {})
+        state.ai_reasoning_traces = list(blob.get("ai_reasoning_traces") or [])
+        state.ai_reasoning_summary = dict(blob.get("ai_reasoning_summary") or {})
+        state.impact_assessments = list(blob.get("impact_assessments") or [])
         state.start_time = float(blob.get("start_time") or time.time())
 
         phase_str = blob.get("phase") or checkpoint.get("next_phase") or "init"

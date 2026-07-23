@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hunterengine"
-version = "3.1.0"
+version = "3.2.0"
 description = "Automated bug bounty engine with hierarchical agents: recon → active recon → enumeration → nested AI vuln hunters."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -75,6 +75,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# MCP server — drive HunterEngine from Claude Desktop / Claude Code.
+mcp = [
+    "mcp>=1.2",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
@@ -83,7 +87,7 @@ dev = [
     "mypy>=1.5",
     "black>=23.0",
     "isort>=5.12",
-    "pre-commit>=3.0",
+    "mcp>=1.2",
 ]
 
 [project.scripts]
@@ -109,6 +113,7 @@ include = [
     "config*",
     "knowledge*",
     "dashboard*",
+    "integrations*",
 ]
 
 [tool.black]

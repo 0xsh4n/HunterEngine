@@ -18,11 +18,14 @@ from typing import Any, Optional
 
 import httpx
 
+from ai.ollama_client import extract_thinking
+
 logger = logging.getLogger("hunterengine.ai.local_reasoner")
 
 
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 PRIORITY_ORDER = ["P5", "P4", "P3", "P2", "P1"]
+EXPLOITABILITY = ["theoretical", "difficult", "moderate", "straightforward", "trivial"]
 
 
 @dataclass
@@ -79,6 +82,21 @@ class LocalAIReasoner:
     def __init__(self, config: LocalAIConfig) -> None:
         self.config = config
         self._sem = asyncio.Semaphore(max(1, config.concurrency))
+        # Retained chain-of-thought captured from the model during triage so
+        # the dashboard / report can show *why* severity moved.
+        self.reasoning_traces: list[dict[str, Any]] = []
+
+    def _capture_trace(self, finding: dict, thinking: str) -> None:
+        thinking = (thinking or "").strip()
+        if not thinking:
+            return
+        self.reasoning_traces.append({
+            "phase": "triage",
+            "agent": "triage_reasoner",
+            "model": self.config.model,
+            "finding": str(finding.get("title", ""))[:120],
+            "text": self._sanitize(thinking)[:4000] if isinstance(thinking, str) else "",
+        })
 
     async def enrich_findings(self, findings: list[dict], scan_state: Any) -> list[dict]:
         """Analyze and enrich eligible findings in place."""
@@ -111,6 +129,7 @@ class LocalAIReasoner:
                 logger.info("AI reasoner enriched %d finding(s) with fallback heuristics", enriched)
             else:
                 logger.warning("AI reasoner did not enrich any findings")
+            self._finalize_reasoning(scan_state, eligible, fallback=True)
             return findings
 
         logger.info(
@@ -131,7 +150,43 @@ class LocalAIReasoner:
         else:
             logger.warning("AI reasoner did not enrich any findings")
 
+        self._finalize_reasoning(scan_state, eligible, fallback=False)
         return findings
+
+    def _finalize_reasoning(self, scan_state: Any, eligible: list[dict], *, fallback: bool) -> None:
+        """Attach captured reasoning traces and a triage summary to the state."""
+        if self.reasoning_traces:
+            existing = list(getattr(scan_state, "ai_reasoning_traces", []) or [])
+            existing.extend(self.reasoning_traces)
+            setattr(scan_state, "ai_reasoning_traces", existing[-300:])
+
+        risk_ranked = sorted(
+            (f for f in eligible if isinstance(f, dict)),
+            key=lambda f: (SEVERITY_ORDER.index(str(f.get("severity", "info")).lower())
+                           if str(f.get("severity", "info")).lower() in SEVERITY_ORDER else 0,
+                           float(f.get("confidence", 0.0) or 0.0)),
+            reverse=True,
+        )
+        summary = {
+            "mode": "fallback-heuristics" if fallback else f"{self.config.provider}/{self.config.model}",
+            "reviewed": len(eligible),
+            "traces_captured": len(self.reasoning_traces),
+            "needs_review": [
+                str(f.get("title", ""))[:100]
+                for f in eligible
+                if isinstance(f, dict) and "ai-needs-review" in (f.get("tags", []) or [])
+            ][:10],
+            "top_risks": [
+                {
+                    "title": str(f.get("title", ""))[:100],
+                    "severity": str(f.get("severity", "info")),
+                    "confidence": round(float(f.get("confidence", 0.0) or 0.0), 3),
+                    "priority": f.get("ai_priority", ""),
+                }
+                for f in risk_ranked[:5]
+            ],
+        }
+        setattr(scan_state, "ai_reasoning_summary", summary)
 
     async def _safe_enrich(
         self,
@@ -163,9 +218,15 @@ class LocalAIReasoner:
         try:
             prompt = self._build_prompt(finding, context)
             content = await self._chat(prompt)
-            parsed = self._parse_json(content)
+            thinking, clean = extract_thinking(content)
+            self._capture_trace(finding, thinking)
+            parsed = self._parse_json(clean or content)
             if parsed:
-                return parsed
+                # Blend model reasoning with the deterministic floor so a terse
+                # model reply still yields actionable validation + remediation.
+                merged = self._fallback_analysis(finding, context)
+                merged.update({k: v for k, v in parsed.items() if v not in (None, "", [], {})})
+                return merged
         except Exception as exc:
             logger.debug("AI response parsing failed for %s: %s", finding.get("title", "finding"), exc)
         return self._fallback_analysis(finding, context)
@@ -195,6 +256,7 @@ class LocalAIReasoner:
             "model": self.config.model,
             "stream": False,
             "format": "json",
+            "think": True,
             "options": {"temperature": self.config.temperature},
             "messages": [
                 {"role": "system", "content": self._system_prompt()},
@@ -207,7 +269,8 @@ class LocalAIReasoner:
                 return await self._generate_ollama(prompt)
             response.raise_for_status()
             data = response.json()
-            return data.get("message", {}).get("content", "")
+            message = data.get("message", {}) or {}
+            return self._with_thinking(message.get("thinking"), message.get("content", ""))
 
     async def _generate_ollama(self, prompt: str) -> str:
         url = self.config.base_url.rstrip("/") + "/api/generate"
@@ -222,7 +285,7 @@ class LocalAIReasoner:
             response = await client.post(url, json=payload, headers=self._headers())
             response.raise_for_status()
             data = response.json()
-            return data.get("response", "")
+            return self._with_thinking(data.get("thinking"), data.get("response", ""))
 
     async def _chat_openai_compatible(self, prompt: str) -> str:
         url = self.config.base_url.rstrip("/") + "/v1/chat/completions"
@@ -242,7 +305,18 @@ class LocalAIReasoner:
             choices = data.get("choices", [])
             if not choices:
                 return ""
-            return choices[0].get("message", {}).get("content", "")
+            msg = choices[0].get("message", {}) or {}
+            return self._with_thinking(msg.get("reasoning_content"), msg.get("content", ""))
+
+    @staticmethod
+    def _with_thinking(thinking: Any, content: Any) -> str:
+        """Re-embed a provider's separate reasoning field so the caller's
+        ``extract_thinking`` can split it back out uniformly."""
+        content = str(content or "")
+        thinking = str(thinking or "").strip()
+        if thinking:
+            return f"<think>{thinking}</think>{content}"
+        return content
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -265,14 +339,30 @@ class LocalAIReasoner:
 
     def _build_prompt(self, finding: dict, context: dict[str, Any]) -> str:
         payload = {
-            "task": "Review this scanner finding and improve triage.",
+            "task": (
+                "Reason step by step about this scanner finding, then improve its "
+                "triage. Weigh the evidence, consider how a real attacker could abuse "
+                "it, and judge false-positive risk before you assign severity."
+            ),
+            "reasoning_process": [
+                "1. Restate what the evidence actually proves (and what it does not).",
+                "2. Identify the vulnerability class and the trust boundary crossed.",
+                "3. Assess exploitability: prerequisites, auth needed, attacker effort.",
+                "4. Assess impact: data/accounts/systems affected if exploited.",
+                "5. Judge false-positive risk from the strength of the evidence.",
+                "6. Decide severity/priority and a safe way to confirm it.",
+            ],
             "required_json_schema": {
                 "plausible": "boolean",
                 "false_positive_risk": "low|medium|high",
                 "severity": "info|low|medium|high|critical",
                 "confidence_delta": "number between -0.25 and 0.25",
                 "priority": "P1|P2|P3|P4|P5",
-                "rationale": "short explanation",
+                "exploitability": "theoretical|difficult|moderate|straightforward|trivial",
+                "impact_area": "short phrase, e.g. 'other users data', 'account takeover'",
+                "attack_prerequisites": ["condition an attacker needs"],
+                "reasoning_steps": ["one short sentence per deduction step"],
+                "rationale": "short explanation of the verdict",
                 "report_summary": "one or two report-ready sentences",
                 "remediation": "short actionable fix guidance",
                 "recommended_validation": ["safe non-destructive validation step"],
@@ -283,6 +373,7 @@ class LocalAIReasoner:
                 "Only raise severity when evidence and impact justify it.",
                 "Recommended validation must be non-destructive and scoped.",
                 "Do not invent proof that is not present in the evidence.",
+                "reasoning_steps must reflect the numbered reasoning_process.",
             ],
             "scan_context": context,
             "finding": self._safe_finding_payload(finding),
@@ -387,6 +478,9 @@ class LocalAIReasoner:
         severity = "medium"
         confidence_delta = 0.02
         priority = "P3"
+        exploitability = "moderate"
+        impact_area = "the affected endpoint"
+        attack_prerequisites = ["network access to the endpoint"]
         rationale = "The finding appears plausible from the available evidence and was reviewed conservatively."
         report_summary = "The scanner surfaced a potentially exploitable issue that merits manual review and safe validation."
         remediation = "Review the affected endpoint, enforce server-side authorization, and validate the behavior without data exfiltration."
@@ -397,6 +491,9 @@ class LocalAIReasoner:
             severity = "high"
             confidence_delta = 0.06
             priority = "P2"
+            exploitability = "straightforward"
+            impact_area = "other users' data or accounts"
+            attack_prerequisites = ["a valid low-privilege session", "an enumerable object reference"]
             rationale = "The evidence suggests a high-impact authorization or access-control issue that warrants careful review."
             remediation = "Enforce authorization checks on the server side and verify the affected object references are bound to the current user."
             recommended_validation = ["Confirm access enforcement with an authenticated, read-only check", "Verify the same user cannot access another user's data"]
@@ -405,6 +502,9 @@ class LocalAIReasoner:
             severity = "medium"
             confidence_delta = 0.04
             priority = "P3"
+            exploitability = "moderate"
+            impact_area = "session integrity or server-side requests"
+            attack_prerequisites = ["ability to influence the vulnerable parameter"]
             rationale = "The signal is consistent with a common injection or client-side issue, but the evidence is still incomplete."
             remediation = "Sanitize or encode untrusted input and validate server-side behavior before deployment."
             recommended_validation = ["Inspect the reflected or stored payload carefully", "Confirm the behavior with a non-destructive, scoped probe"]
@@ -417,12 +517,23 @@ class LocalAIReasoner:
         if context.get("weak_signal_count", 0) == 0:
             false_positive_risk = "low"
 
+        reasoning_steps = [
+            f"Evidence points to a {tags[0].replace('-', ' ')} pattern on {url or 'the target'}.",
+            f"Exploitability judged {exploitability}; likely impact touches {impact_area}.",
+            f"False-positive risk assessed {false_positive_risk} from the available signal.",
+            f"Assigned {severity} / {priority} pending non-destructive confirmation.",
+        ]
+
         return {
             "plausible": plausible,
             "false_positive_risk": false_positive_risk,
             "severity": severity,
             "confidence_delta": round(_clamp_float(confidence_delta, -0.25, 0.25), 3),
             "priority": priority,
+            "exploitability": exploitability,
+            "impact_area": impact_area,
+            "attack_prerequisites": attack_prerequisites,
+            "reasoning_steps": reasoning_steps,
             "rationale": rationale,
             "report_summary": report_summary,
             "remediation": remediation,
@@ -443,6 +554,12 @@ class LocalAIReasoner:
             ),
             "rationale": _short_text(analysis.get("rationale", ""), 800),
             "recommended_validation": _string_list(analysis.get("recommended_validation", []), 5),
+            "exploitability": _choice(
+                analysis.get("exploitability"), set(EXPLOITABILITY), "moderate"
+            ),
+            "impact_area": _short_text(analysis.get("impact_area", ""), 160),
+            "attack_prerequisites": _string_list(analysis.get("attack_prerequisites", []), 5),
+            "reasoning_steps": _string_list(analysis.get("reasoning_steps", []), 8),
         }
         metadata["ai_analysis"] = ai_meta
 

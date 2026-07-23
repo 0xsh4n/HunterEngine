@@ -4,6 +4,32 @@ All notable changes to HunterEngine will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] — 2026-07-23
+
+### Added
+- **MCP server** (`python main.py mcp`, `integrations/mcp_server.py`) — expose HunterEngine to **Claude Desktop / Claude Code** as MCP tools so Claude drives the engine (start/stop/status scans, then read findings, reasoning, behaviour, and domain learning back). Tools: `methodology`, `get_scope`, `ai_health`, `start_scan`, `scan_status`, `stop_scan`, `run_summary`, `list_findings`, `get_reasoning`, `get_behavior`, `list_domains`. Optional `mcp` extra (`pip install -e ".[mcp]"`); tool logic is transport-independent and unit-tested without the SDK
+- **Classic 8-step methodology** — pipeline reorganized into Recon → Scanning/Enumeration → Threat Modeling → Vulnerability Analysis → Exploitation → Post-Exploitation → Correlation → Reporting (`core/methodology.py` as the single source of truth; classic step names available as `--phase` aliases)
+- **AI in every phase** — `ai/phase_reasoner.py` emits an explainable decision + rationale before each phase (deterministic by default; optional local LLM via `ai.phase_reasoning: true`), recorded to scan state for the dashboard/report
+- **Dashboard scan control** — start / stop / abort scans from the web console (`dashboard/scan_manager.py` runs the orchestrator in a background thread; cooperative stop via the ScanController) with a live 8-step progress stepper, live counts, and streaming per-phase reasoning; new API: `/api/scan/start`, `/api/scan/stop`, `/api/scan/status`, `/api/methodology`
+- **Faster, behaviour-driven detection** — detectors are ranked by the threat model's focus areas + auth mechanisms and run **concurrently** (bounded) instead of sequentially; opt-in `detection.behaviour_driven` prunes low-relevance detectors (cheap passive baseline always runs)
+- **Non-destructive post-exploitation** (`ai/impact.py`) — ranks blast radius, attacker gain, and same-host chain/escalation paths without sending traffic; annotates findings and records a reasoning trace
+- **Explainable reasoning** — the AI client captures the model's thinking traces (Ollama `thinking`, OpenAI-compat `reasoning_content`, and leaked `<think>` blocks) instead of discarding them; retained on scan state and persisted in checkpoints
+- **Step-by-step triage** in `LocalAIReasoner` (evidence → vuln class → exploitability → impact → FP risk → verdict); findings gain `reasoning_steps`, `exploitability`, `impact_area`, `attack_prerequisites`, plus a per-run reasoning summary
+- **Operational web dashboard** — 7 tabs (Overview, Reasoning & Thinking, Behaviour Analysis, Findings, Domain Learning, Settings, Scope) reading the latest checkpoint, with a **live AI-usage navbar** (model, tokens, requests, thinking chars, latency, health)
+- New dashboard API: `/api/run`, `/api/usage`, `/api/reasoning`, `/api/behavior`, `/api/findings`, enriched `/api/domains`
+- **Scored behaviour analysis** — attack-surface scoring across sensitive categories, object-reference (IDOR) and state-changing detection, auth posture, top parameters, and a ranked focus-area plan
+- **Learning analytics** — domain profiles track success rate, hit rate, risk score, per-class effectiveness, and finding-history trends; new `DomainLearner.analytics()` aggregate
+- CLI `print_results` now shows reasoning-trace/thinking counts and an AI reasoning summary
+- Tests: `tests/test_reasoning_traces.py` (thinking extraction, trace capture, deeper triage, behaviour scoring, dashboard run-loader)
+
+### Fixed
+- Test suite: `pytest-asyncio` config consolidated into `pyproject.toml`; removed the duplicate `[tool:pytest]` block in `setup.cfg` that triggered an "ignoring pytest config" warning and left async health-check tests unrun
+
+### Changed
+- Checkpoint save/restore carry `ai_reasoning_traces`, `ai_reasoning_summary`, and `impact_assessments`
+- Threat modeling (behaviour analysis + agentic planning) is now its own phase, ahead of detection and exploitation, so detectors can be behaviour-driven
+- README documents the 8-step methodology, dashboard scan control, AI-in-every-phase, faster detection, and scored behaviour/learning analytics
+
 ## [3.1.0] — 2026-07-22
 
 ### Added

@@ -1,103 +1,95 @@
-# hunterengine global settings
-
 general:
-  concurrency: 20                 # Max concurrent async tasks
-  timeout: 30                     # Default HTTP timeout (seconds)
-  retries: 2                      # Retry failed requests
-  user_agent: "random"            # random | static | <custom string>
-  data_dir: "data"
+  concurrency: 20
+  timeout: 30
+  retries: 2
+  user_agent: random
+  data_dir: data
   verbose: false
   color_output: true
-  strict_failures: false          # Continue with partial results when a phase/module crashes
-
-# Agentic testing posture. Black-box is the safe default; grey-box may use
-# configured auth headers only when safety.active_testing.greybox_authorized=true.
+  strict_failures: false
 testing:
-  profile: "blackbox"
+  profile: blackbox
   account_testing:
-    enabled: false             # Generation/submission requires explicit authorization
-    submit_signup: false       # Never enable against production without written scope
-    email_domain: "example.invalid"
-
+    enabled: false
+    submit_signup: false
+    email_domain: example.invalid
 knowledge:
   enabled: true
-  index_path: "data/knowledge/index.json"
+  index_path: data/knowledge/index.json
   chunk_size: 1200
   chunk_overlap: 180
-
 rate_limiting:
-  requests_per_second: 10         # Global RPS cap
-  per_host_rps: 5                 # Per-host RPS cap
-  burst_size: 20                  # Burst allowance
-  adaptive: true                  # Auto-slow on WAF/429
-  backoff_factor: 2.0             # Exponential backoff multiplier
-  backoff_max: 120                # Max backoff seconds
-
-# Deterministic guardrails for every AI-planned active request.  Expand these
-# only for a written, authorized test plan; state-changing verbs stay off by default.
+  requests_per_second: 10
+  per_host_rps: 5
+  burst_size: 20
+  adaptive: true
+  backoff_factor: 2.0
+  backoff_max: 120
 safety:
   active_testing:
-    allowed_methods: ["GET", "HEAD", "OPTIONS"]
-    allow_authenticated_requests: false  # Set true for explicitly authorized greybox tests
+    allowed_methods:
+    - GET
+    - HEAD
+    - OPTIONS
+    allow_authenticated_requests: false
     max_response_bytes: 1000000
     max_failures_per_host: 4
     max_server_errors_per_host: 3
     cooldown_seconds: 90
     max_request_seconds: 15
-    profile: "blackbox"
+    profile: blackbox
     max_total_requests: 500
     max_requests_per_host: 100
     max_consecutive_timeouts: 3
-
 proxy:
   enabled: true
-  listen_host: "127.0.0.1"
+  listen_host: 127.0.0.1
   listen_port: 8080
-  auto_port: true                 # If 8080 is busy, use the next free local port
-  upstream_proxy: ""              # e.g. socks5://127.0.0.1:9050
+  auto_port: true
+  upstream_proxy: ''
   log_requests: true
-  intercept_mode: false           # Manual intercept mode
-
+  intercept_mode: false
 browser:
   headless: true
   chromium_args:
-    - "--disable-gpu"
-    - "--no-sandbox"
-    - "--disable-dev-shm-usage"
-  page_timeout: 30000             # ms
+  - --disable-gpu
+  - --no-sandbox
+  - --disable-dev-shm-usage
+  page_timeout: 30000
   screenshot_on_finding: true
-  screenshot_dir: "data/screenshots"
-
+  screenshot_dir: data/screenshots
 waf_bypass:
   ip_rotation:
     enabled: false
-    provider: "aws"               # aws | proxy_pool
-    regions: ["us-east-1", "us-west-2", "eu-west-1"]
+    provider: aws
+    regions:
+    - us-east-1
+    - us-west-2
+    - eu-west-1
   tls_impersonation:
     enabled: false
-    browser: "chrome"             # chrome | firefox
+    browser: chrome
   ua_rotation: true
   referrer_spoof: true
-  delay_range: [0.5, 2.0]        # Random delay between requests (seconds)
-
+  delay_range:
+  - 0.5
+  - 2.0
 recon:
   subdomain_threads: 10
   concurrency: 10
   max_root_domains: 5000
-  dns_wordlist: "config/wordlists/subdomains.txt"
+  dns_wordlist: config/wordlists/subdomains.txt
   resolve_all: true
-  port_scan_top: 1000             # Top N ports to scan
-
+  port_scan_top: 1000
 crawl:
   max_depth: 5
   max_pages: 500
-  respect_robots: false           # For authorized testing
+  respect_robots: false
   js_rendering: true
-  form_fill: false                # Auto-fill discovered forms
-  param_wordlist: "config/wordlists/params.txt"
-
+  form_fill: false
+  param_wordlist: config/wordlists/params.txt
 detection:
-  modules:                        # Enable/disable individual detectors
+  modules:
     xss: true
     cors: true
     secrets: true
@@ -113,70 +105,71 @@ detection:
     dependency: true
     race_condition: true
     crypto: false
-  confidence_threshold: 0.6       # Min confidence to report (0.0-1.0)
-  nuclei_templates: ""            # Path to custom nuclei templates
-  nuclei_severity: ["critical", "high", "medium"]
-
+  confidence_threshold: 0.6
+  concurrency: 6
+  behaviour_driven: true
+  nuclei_templates: ''
+  nuclei_severity:
+  - critical
+  - high
+  - medium
 ai:
   enabled: true
-  # triage = report enrichment only | testing = bug-hunt subagents | both
-  mode: "testing"
-  provider: "ollama"              # ollama | openai-compatible | lmstudio | llama.cpp
-  max_findings: 50                # Cap for reporting triage
+  mode: both
+  provider: ollama
+  max_findings: 50
   min_confidence: 0.2
   concurrency: 2
   max_context_chars: 6000
   redact_sensitive: true
-  # Reporting / triage model (used when mode is triage or both)
   local_model:
-    base_url: "http://127.0.0.1:11434"   # Docker: http://host.docker.internal:11434
-    model: "qwen3:4b"
+    base_url: http://10.3.20.55:11434/
+    model: qwen3:4b
     timeout: 45
     temperature: 0.1
-    api_key_env: ""
-  # Testing / bug-hunt model — Qwen3 4B with reasoning (Ollama think)
+    api_key_env: ''
   testing_model:
-    base_url: "http://127.0.0.1:11434"   # External Ollama; override via OLLAMA_BASE_URL
-    model: "qwen3:4b"
+    base_url: http://10.3.20.55:11434/
+    model: qwen3:4b
     timeout: 90
     temperature: 0.2
-    think: true                   # Qwen3 reasoning; set false for max speed
+    think: true
     num_ctx: 8192
     num_predict: 1536
-    api_key_env: ""
+    api_key_env: ''
   testing:
-    enabled: true                 # Also implied when mode is testing/both
-    generated_agent: false        # Optional ephemeral AI planner; generated code is never executed
-    planner_deadline: 25          # Overall seconds for all specialist planning before fallback
-    concurrency: 3                # Parallel subagents + probes
-    max_endpoints: 40             # Ranked endpoints fed to the hunters
+    enabled: true
+    generated_agent: false
+    planner_deadline: 50
+    concurrency: 3
+    max_endpoints: 40
     max_probes_per_agent: 8
     max_total_probes: 60
     min_confidence: 0.55
-    domain_learning: true         # Persist per-domain behaviour for smarter later scans
+    domain_learning: true
     subagents:
-      - xss
-      - idor
-      - ssti
-      - ssrf
-      - auth
-      - open_redirect
-      - request_smuggling
-      - cors
-      - jwt
-
+    - xss
+    - idor
+    - ssti
+    - ssrf
+    - auth
+    - open_redirect
+    - request_smuggling
+    - cors
+    - jwt
 reporting:
-  format: ["markdown", "hackerone"]  # markdown | html | hackerone | bugcrowd
-  output_dir: "data/reports"
+  format:
+  - markdown
+  - hackerone
+  output_dir: data/reports
   include_evidence: true
   include_screenshots: true
-  auto_triage: true               # Auto-classify severity
-  evidence_dirs:                  # Eyewitness/Gowitness/browser evidence locations
-    - "data/screenshots"
-    - "data/eyewitness"
-    - "data/gowitness"
-
+  auto_triage: true
+  evidence_dirs:
+  - data/screenshots
+  - data/eyewitness
+  - data/gowitness
 database:
-  backend: "sqlite"               # sqlite | postgresql
-  sqlite_path: "data/findings.db"
-  memory_db_path: "data/memory.db"
+  backend: sqlite
+  sqlite_path: data/findings.db
+  memory_db_path: data/memory.db

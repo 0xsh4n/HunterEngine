@@ -130,7 +130,7 @@ class HunterSubagent(ABC):
             # deterministic fallback planner when this returns empty.
             timeout = min(float(getattr(self.client.config, "timeout", 20.0)), 20.0)
             data = await asyncio.wait_for(
-                self.client.chat_json(system=self.system_prompt(), user=user),
+                self.client.chat_json(system=self.system_prompt(), user=user, label=self.name),
                 timeout=max(3.0, timeout),
             )
         except Exception as exc:

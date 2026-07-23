@@ -1,37 +1,30 @@
-# hunterengine scope definition
-# CRITICAL: Only test targets you are AUTHORIZED to test.
-# This file enforces scope boundaries for all modules.
-
 program:
-  name: "Example"
-  platform: "Internal Pentesting"           # hackerone | bugcrowd | private
-  url: "Example.com"                         # Program URL for reference
-
+  name: Pulse BPI
+  platform: Black Box Pentesting
+  url: https://pulsebpi.com
 in_scope:
   domains: []
-  cidrs: []                       # e.g. "10.0.0.0/8"
-  urls:
-    - "https://example.com"                        # Specific URL paths to include
-    
-out_of_scope:
-  domains:
-    - "admin.example.com"
-    - "vpn.example.com"
   cidrs: []
   urls:
-    - "*/logout"
-    - "*/delete-account"
-  keywords:                       # Never fuzz these params
-    - "password_reset"
-    - "delete"
-    - "destroy"
-
+  - https://app.pulsebpi.com/login
+out_of_scope:
+  domains:
+  - admin.example.com
+  - vpn.example.com
+  cidrs: []
+  urls:
+  - '*/logout'
+  - '*/delete-account'
+  keywords:
+  - password_reset
+  - delete
+  - destroy
 auth:
-  type: "none"                    # none | bearer | cookie | basic | custom
-  token: ""
-  cookie: ""
-  headers: {}                     # Custom auth headers
-  login_url: ""
+  type: none
+  token: ''
+  cookie: ''
+  headers: {}
+  login_url: ''
   credentials:
-    username: ""
-    password: ""
+    username: ''
+    password: ''

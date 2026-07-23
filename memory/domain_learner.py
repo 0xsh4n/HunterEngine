@@ -79,12 +79,60 @@ class DomainLearner:
                         "successful_classes": data.get("successful_classes", {}),
                         "preferred_subagents": data.get("preferred_subagents", []),
                         "auth_mechanisms": data.get("auth_mechanisms", []),
+                        "total_findings": data.get("total_findings", 0),
+                        "success_rate": data.get("success_rate", 0.0),
+                        "hit_rate": data.get("hit_rate", 0.0),
+                        "risk_score": data.get("risk_score", 0.0),
+                        "focus_areas": data.get("focus_areas", []),
+                        "class_effectiveness": data.get("class_effectiveness", {}),
+                        "finding_history": data.get("finding_history", []),
+                        "notes": data.get("notes", [])[-5:],
                         "updated_at": data.get("updated_at"),
                         "path": str(path),
                     })
             except (OSError, json.JSONDecodeError):
                 continue
+        rows.sort(key=lambda r: (r.get("risk_score") or 0, r.get("total_findings") or 0), reverse=True)
         return rows
+
+    def analytics(self) -> dict[str, Any]:
+        """Aggregate learning across all known domains (for the dashboard)."""
+        rows = self.list_profiles()
+        if not rows:
+            return {
+                "domains": 0, "total_scans": 0, "total_findings": 0,
+                "avg_success_rate": 0.0, "top_classes": [], "top_hunters": [],
+                "riskiest": [],
+            }
+        class_totals: dict[str, int] = {}
+        hunter_totals: dict[str, int] = {}
+        for r in rows:
+            for cls, n in (r.get("successful_classes") or {}).items():
+                class_totals[cls] = class_totals.get(cls, 0) + int(n or 0)
+            for pos, name in enumerate(r.get("preferred_subagents") or []):
+                hunter_totals[name] = hunter_totals.get(name, 0) + (6 - min(pos, 5))
+        total_scans = sum(int(r.get("scan_count") or 0) for r in rows)
+        total_findings = sum(int(r.get("total_findings") or 0) for r in rows)
+        rates = [float(r.get("success_rate") or 0) for r in rows if r.get("scan_count")]
+        return {
+            "domains": len(rows),
+            "total_scans": total_scans,
+            "total_findings": total_findings,
+            "avg_success_rate": round(sum(rates) / len(rates), 3) if rates else 0.0,
+            "top_classes": [
+                {"class": k, "count": v}
+                for k, v in sorted(class_totals.items(), key=lambda kv: kv[1], reverse=True)[:8]
+            ],
+            "top_hunters": [
+                {"hunter": k, "score": v}
+                for k, v in sorted(hunter_totals.items(), key=lambda kv: kv[1], reverse=True)[:8]
+            ],
+            "riskiest": [
+                {"domain": r["domain"], "risk_score": r.get("risk_score", 0),
+                 "findings": r.get("total_findings", 0)}
+                for r in rows[:6]
+            ],
+        }
 
     def context_for_targets(self, urls: list[str]) -> dict[str, Any]:
         """Aggregate profiles for hosts present in the current target set."""
@@ -214,8 +262,36 @@ class DomainLearner:
                 if note not in profile["notes"][-5:]:
                     profile["notes"].append(note)
             profile["notes"] = profile["notes"][-30:]
-            profile["last_findings"] = len(host_findings)
-            profile["last_ai_probes"] = int(getattr(state, "ai_test_probes", 0) or 0)
+
+            # ── Analytics: yield trend, risk surface, hunter effectiveness ──
+            found = len(host_findings)
+            ai_probes = int(getattr(state, "ai_test_probes", 0) or 0)
+            profile["last_findings"] = found
+            profile["last_ai_probes"] = ai_probes
+            profile["total_findings"] = int(profile.get("total_findings", 0)) + found
+            profile["success_rate"] = round(
+                profile["total_findings"] / max(1, profile["scan_count"]), 3
+            )
+            profile["hit_rate"] = round(found / ai_probes, 3) if ai_probes else 0.0
+            if behavior.get("risk_score") is not None:
+                profile["risk_score"] = behavior.get("risk_score")
+            if behavior.get("focus_areas"):
+                profile["focus_areas"] = [
+                    a.get("area") for a in behavior.get("focus_areas", [])[:6]
+                ]
+            history = list(profile.get("finding_history", []) or [])
+            history.append({
+                "ts": time.time(),
+                "findings": found,
+                "ai_probes": ai_probes,
+                "risk_score": behavior.get("risk_score"),
+            })
+            profile["finding_history"] = history[-40:]
+            # Track effectiveness per vuln class so ranking reflects real payoff.
+            effectiveness = dict(profile.get("class_effectiveness", {}) or {})
+            for cls, count in profile["successful_classes"].items():
+                effectiveness[cls] = round(int(count) / max(1, profile["scan_count"]), 3)
+            profile["class_effectiveness"] = effectiveness
             self.save(profile)
             updated.append(profile)
             logger.info(

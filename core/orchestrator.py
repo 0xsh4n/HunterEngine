@@ -26,6 +26,7 @@ from core.browser_engine import BrowserEngine, BrowserConfig
 from core.proxy_engine import ProxyEngine, ProxyConfig, find_available_port, is_port_available
 from core.scan_control import ScanController, ControlAction
 from core.checkpoint import CheckpointStore
+from core.methodology import PIPELINE_ORDER, RUNNER_TO_STEP, METHODOLOGY
 
 logger = logging.getLogger("hunterengine.orchestrator")
 
@@ -44,21 +45,35 @@ class ScanPhase(str, Enum):
     RECON = "recon"
     ACTIVE_RECON = "active_recon"
     CRAWL = "crawl"  # enumeration (alias: enumeration)
-    AI_TEST = "ai_test"
+    THREAT_MODEL = "threat_model"
     DETECT = "detect"
+    AI_TEST = "ai_test"
+    POST_EXPLOIT = "post_exploit"
     CORRELATE = "correlate"
     AI = "ai"
     REPORT = "report"
     DONE = "done"
 
 
-# CLI aliases → canonical phase value
+# CLI aliases → canonical phase value. Classic-pentest step names map onto the
+# internal runner phases so `--phase exploitation` etc. work as expected.
 PHASE_ALIASES: dict[str, str] = {
     "enumeration": ScanPhase.CRAWL.value,
     "enum": ScanPhase.CRAWL.value,
+    "scanning": ScanPhase.ACTIVE_RECON.value,
+    "threat_modeling": ScanPhase.THREAT_MODEL.value,
+    "threatmodel": ScanPhase.THREAT_MODEL.value,
     "vuln": ScanPhase.AI_TEST.value,
+    "vuln_analysis": ScanPhase.DETECT.value,
+    "vulnerability_analysis": ScanPhase.DETECT.value,
     "vuln_hunt": ScanPhase.AI_TEST.value,
+    "exploit": ScanPhase.AI_TEST.value,
+    "exploitation": ScanPhase.AI_TEST.value,
+    "post_exploitation": ScanPhase.POST_EXPLOIT.value,
+    "postexploit": ScanPhase.POST_EXPLOIT.value,
     "passive_recon": ScanPhase.RECON.value,
+    "reporting": ScanPhase.REPORT.value,
+    "triage": ScanPhase.AI.value,
 }
 
 
@@ -99,6 +114,11 @@ class ScanState:
     behavior_model: dict[str, Any] = field(default_factory=dict)
     learning_events: list[dict] = field(default_factory=list)
     ai_token_usage: dict[str, int] = field(default_factory=dict)
+    # Explainability: retained model chain-of-thought and a triage summary.
+    ai_reasoning_traces: list[dict] = field(default_factory=list)
+    ai_reasoning_summary: dict[str, Any] = field(default_factory=dict)
+    # Post-exploitation (non-destructive) impact assessments.
+    impact_assessments: list[dict] = field(default_factory=list)
 
 
 class Orchestrator:
@@ -145,6 +165,8 @@ class Orchestrator:
         self._completed_phases: list[str] = []
         self._resume_skip: set[str] = set()
         self.last_checkpoint_path: Optional[Path] = None
+        self._phase_reasoner: Any = None
+        self._phase_progress: list[dict[str, Any]] = []
 
     def load_settings(self) -> dict[str, Any]:
         """Load settings.yaml."""
@@ -184,17 +206,8 @@ class Orchestrator:
         self._resume_skip = set(completed)
         next_phase = data.get("next_phase")
         if next_phase:
-            # Skip everything before next_phase in the default pipeline order
-            order = [
-                ScanPhase.RECON.value,
-                ScanPhase.ACTIVE_RECON.value,
-                ScanPhase.CRAWL.value,
-                ScanPhase.AI_TEST.value,
-                ScanPhase.DETECT.value,
-                ScanPhase.CORRELATE.value,
-                ScanPhase.AI.value,
-                ScanPhase.REPORT.value,
-            ]
+            # Skip everything before next_phase in the methodology pipeline order
+            order = list(PIPELINE_ORDER)
             if next_phase in order:
                 idx = order.index(next_phase)
                 self._resume_skip.update(order[:idx])
@@ -364,16 +377,21 @@ class Orchestrator:
         """
         phases = self.normalize_phases(phases)
 
-        all_phases = [
-            (ScanPhase.RECON, self._run_recon),
-            (ScanPhase.ACTIVE_RECON, self._run_active_recon),
-            (ScanPhase.CRAWL, self._run_crawl),
-            (ScanPhase.AI_TEST, self._run_ai_test),
-            (ScanPhase.DETECT, self._run_detect),
-            (ScanPhase.CORRELATE, self._run_correlate),
-            (ScanPhase.AI, self._run_ai),
-            (ScanPhase.REPORT, self._run_report),
-        ]
+        runner_map = {
+            ScanPhase.RECON.value: self._run_recon,
+            ScanPhase.ACTIVE_RECON.value: self._run_active_recon,
+            ScanPhase.CRAWL.value: self._run_crawl,
+            ScanPhase.THREAT_MODEL.value: self._run_threat_model,
+            ScanPhase.DETECT.value: self._run_detect,
+            ScanPhase.AI_TEST.value: self._run_ai_test,
+            ScanPhase.POST_EXPLOIT.value: self._run_post_exploit,
+            ScanPhase.CORRELATE.value: self._run_correlate,
+            ScanPhase.AI.value: self._run_ai,
+            ScanPhase.REPORT.value: self._run_report,
+        }
+        # Order follows the classic 8-step methodology (single source of truth).
+        all_phases = [(ScanPhase(value), runner_map[value]) for value in PIPELINE_ORDER]
+        self._init_phase_progress(all_phases, phases)
 
         self.controller.install()
         logger.info("Controls: Ctrl+C to pause → [r]esume / [q]uit+save / [a]bort")
@@ -398,8 +416,12 @@ class Orchestrator:
                 await self._handle_control(f"before:{next_name}", next_phase=next_name)
 
                 self.state.phase = phase
+                self._mark_phase(phase.value, "running")
                 logger.info(f"═══ Starting phase: {phase.value.upper()} ═══")
                 phase_start = time.time()
+
+                # AI-in-every-phase: reason about what this phase will do first.
+                await self._reason_phase(phase.value)
 
                 try:
                     await runner()
@@ -416,6 +438,7 @@ class Orchestrator:
                     self.state.phase_health[phase.value] = {"status": "failed", "error": str(e)[:300], "traceback": tb[:4000]}
                     self.state.learning_events.append({"phase": phase.value, "result": "failure", "error": str(e)[:300]})
                     self._save_checkpoint("error", next_phase=phase.value)
+                    self._mark_phase(phase.value, "failed", elapsed=round(time.time() - phase_start, 2))
                     # Continue by default: partial results are more useful than
                     # a crash. Strict mode can retain fail-fast behavior.
                     strict = bool((self.settings.get("general", {}) or {}).get("strict_failures", False))
@@ -424,6 +447,7 @@ class Orchestrator:
                 else:
                     self.state.phase_health[phase.value] = {"status": "ok", "elapsed": round(time.time() - phase_start, 2)}
                     self.state.learning_events.append({"phase": phase.value, "result": "success", "elapsed": round(time.time() - phase_start, 2)})
+                    self._mark_phase(phase.value, "done", elapsed=round(time.time() - phase_start, 2))
 
                 elapsed = time.time() - phase_start
                 logger.info(f"═══ Phase {phase.value} completed in {elapsed:.1f}s ═══")
@@ -472,6 +496,54 @@ class Orchestrator:
 
         return self.state
 
+    # ── Per-phase AI reasoning + progress ─────────────────────────────────
+    def _get_phase_reasoner(self):
+        if self._phase_reasoner is None:
+            from ai.phase_reasoner import PhaseReasoner
+
+            ai_conf = self.settings.get("ai", {}) or {}
+            use_llm = bool(ai_conf.get("enabled")) and bool(ai_conf.get("phase_reasoning", False))
+            client = None
+            if use_llm:
+                try:
+                    from ai.ollama_client import OllamaClient
+                    from ai.testing_agent import TestingAIConfig
+                    client = OllamaClient(TestingAIConfig.from_settings(self.settings).to_client_config())
+                except Exception as exc:
+                    logger.debug("Phase reasoner LLM unavailable: %s", exc)
+                    use_llm = False
+            self._phase_reasoner = PhaseReasoner(client, use_llm=use_llm)
+        return self._phase_reasoner
+
+    async def _reason_phase(self, phase: str) -> None:
+        """AI/deterministic rationale for the upcoming phase (never blocks it)."""
+        try:
+            decision = await self._get_phase_reasoner().reason(phase, self.state)
+            logger.info("AI plan [%s]: %s", phase, decision.get("rationale", ""))
+        except Exception as exc:
+            logger.debug("Phase reasoning failed for %s: %s", phase, exc)
+
+    def _init_phase_progress(self, all_phases, selected) -> None:
+        prog: list[dict[str, Any]] = []
+        for phase, _ in all_phases:
+            if selected and phase.value not in selected:
+                continue
+            prog.append({
+                "phase": phase.value,
+                "step": RUNNER_TO_STEP.get(phase.value, phase.value),
+                "status": "pending",
+                "elapsed": None,
+            })
+        self._phase_progress = prog
+
+    def _mark_phase(self, value: str, status: str, elapsed: Optional[float] = None) -> None:
+        for row in self._phase_progress:
+            if row["phase"] == value:
+                row["status"] = status
+                if elapsed is not None:
+                    row["elapsed"] = elapsed
+                break
+
     def _persist_domain_learning(self) -> None:
         """Write per-domain behaviour profiles once per run."""
         if getattr(self, "_domain_learned", False):
@@ -507,66 +579,147 @@ class Orchestrator:
 
         await EnumerationAgent(self._agent_context()).run(self.state)
 
-    async def _run_ai_test(self) -> None:
-        """Vuln hunt agent: nested IDOR / SSTI / smuggling / XSS / … hunters."""
-        from ai.agents import VulnHuntAgent
-        from ai.agentic import AgenticPlanner
+    async def _run_threat_model(self) -> None:
+        """Step 3 — Threat Modeling: scored attack surface + AI planning."""
         from ai.behavior import analyze_behavior
+        from ai.agentic import AgenticPlanner
 
-        analyze_behavior(self.state)
+        model = analyze_behavior(self.state)
         AgenticPlanner(self.profile or "blackbox").apply(self.state)
+        logger.info(
+            "Threat model: risk=%s focus=%s state-changing=%s object-refs=%s",
+            model.get("risk_score", 0),
+            ",".join(a.get("area", "") for a in model.get("focus_areas", [])[:5]) or "none",
+            model.get("state_changing_endpoints", 0),
+            model.get("object_reference_endpoints", 0),
+        )
+
+    async def _run_ai_test(self) -> None:
+        """Step 5 — Exploitation (safe validation): nested AI vuln hunters."""
+        from ai.agents import VulnHuntAgent
+
+        # Threat modeling normally runs first; ensure a model exists for
+        # phase-only (`--phase exploitation`) runs.
+        if not getattr(self.state, "behavior_model", None):
+            await self._run_threat_model()
 
         await VulnHuntAgent(self._agent_context()).run(self.state)
 
+    async def _run_post_exploit(self) -> None:
+        """Step 6 — Post-Exploitation (impact): non-destructive impact assessment."""
+        from ai.impact import assess_impact
+
+        assess_impact(self.state)
+
+    # Detectors that are cheap/passive — always worth running regardless of the
+    # behaviour model, so behaviour-driven pruning never drops baseline coverage.
+    _DETECTOR_MAP = {
+        "secrets": "detection.secrets_detector.SecretsDetector",
+        "cors": "detection.cors_detector.CORSDetector",
+        "xss": "detection.xss_detector.XSSDetector",
+        "jwt": "detection.jwt_detector.JWTDetector",
+        "prototype_pollution": "detection.prototype_pollution.PrototypePollutionDetector",
+        "ssrf": "detection.ssrf_detector.SSRFDetector",
+        "idor": "detection.idor_detector.IDORDetector",
+        "graphql": "detection.graphql_detector.GraphQLDetector",
+        "auth": "detection.auth_detector.AuthDetector",
+        "open_redirect": "detection.open_redirect.OpenRedirectDetector",
+        "csp": "detection.csp_analyzer.CSPAnalyzer",
+        "subdomain_takeover": "detection.subdomain_takeover.SubdomainTakeoverDetector",
+        "dependency": "detection.dependency_scanner.DependencyScanner",
+        "race_condition": "detection.race_condition.RaceConditionDetector",
+        "crypto": "detection.crypto_specific.CryptoDetector",
+    }
+    _DETECTOR_BASELINE = {"secrets", "csp", "dependency", "subdomain_takeover"}
+
     async def _run_detect(self) -> None:
-        """Detection phase: run enabled detection modules."""
-        det_conf = self.settings.get("detection", {})
-        modules_conf = det_conf.get("modules", {})
+        """Step 4 — Vulnerability Analysis.
+
+        Detectors are prioritized by the threat model and run concurrently
+        (bounded) instead of one-at-a-time, which is where the old sequential
+        loop spent most of its wall-clock time.
+        """
+        det_conf = self.settings.get("detection", {}) or {}
+        modules_conf = det_conf.get("modules", {}) or {}
         threshold = det_conf.get("confidence_threshold", 0.6)
+        behavior = getattr(self.state, "behavior_model", {}) or {}
 
-        detector_map = {
-            "secrets": "detection.secrets_detector.SecretsDetector",
-            "cors": "detection.cors_detector.CORSDetector",
-            "xss": "detection.xss_detector.XSSDetector",
-            "jwt": "detection.jwt_detector.JWTDetector",
-            "prototype_pollution": "detection.prototype_pollution.PrototypePollutionDetector",
-            "ssrf": "detection.ssrf_detector.SSRFDetector",
-            "idor": "detection.idor_detector.IDORDetector",
-            "graphql": "detection.graphql_detector.GraphQLDetector",
-            "auth": "detection.auth_detector.AuthDetector",
-            "open_redirect": "detection.open_redirect.OpenRedirectDetector",
-            "csp": "detection.csp_analyzer.CSPAnalyzer",
-            "subdomain_takeover": "detection.subdomain_takeover.SubdomainTakeoverDetector",
-            "dependency": "detection.dependency_scanner.DependencyScanner",
-            "race_condition": "detection.race_condition.RaceConditionDetector",
-            "crypto": "detection.crypto_specific.CryptoDetector",
+        enabled = [n for n in self._DETECTOR_MAP if modules_conf.get(n, False)]
+        ranked = self._rank_detectors(enabled, behavior)
+
+        # Behaviour-driven pruning (opt-in): skip detectors with zero relevance
+        # to the observed surface, except the cheap passive baseline.
+        behaviour_driven = bool(det_conf.get("behaviour_driven", det_conf.get("behavior_driven", False)))
+        if behaviour_driven and behavior.get("focus_areas"):
+            pruned = [(n, s) for n, s in ranked if s > 0 or n in self._DETECTOR_BASELINE]
+            if pruned:
+                skipped = [n for n, _ in ranked if n not in {p for p, _ in pruned}]
+                if skipped:
+                    logger.info("Behaviour-driven detection skipped low-relevance: %s", ",".join(skipped))
+                ranked = pruned
+
+        concurrency = int(det_conf.get("concurrency", (self.settings.get("general", {}) or {}).get("concurrency", 6)))
+        sem = asyncio.Semaphore(max(1, min(concurrency, 8)))
+        logger.info(
+            "Detection: %d detector(s) by relevance [%s], concurrency=%d",
+            len(ranked), ",".join(n for n, _ in ranked) or "none", max(1, min(concurrency, 8)),
+        )
+
+        async def run_one(name: str) -> list[dict]:
+            async with sem:
+                if self.controller.should_stop:
+                    return []
+                try:
+                    module_name, class_name = self._DETECTOR_MAP[name].rsplit(".", 1)
+                    import importlib
+                    mod = importlib.import_module(module_name)
+                    detector = getattr(mod, class_name)(
+                        rate_limiter=self.rate_limiter,
+                        waf_bypass=self.waf_bypass,
+                        scope_loader=self.scope_loader,
+                        browser=self.browser,
+                    )
+                    return list(await detector.run(self.state) or [])
+                except Exception as exc:
+                    logger.error("Detector %s failed: %s", name, exc)
+                    self.state.errors.append(f"detector.{name}: {exc}")
+                    return []
+
+        results = await asyncio.gather(*(run_one(name) for name, _ in ranked))
+        for findings in results:
+            for finding in findings:
+                if finding.get("confidence", 0) >= threshold:
+                    self.state.findings.append(finding)
+                else:
+                    self.state.weak_signals.append(finding)
+
+    @staticmethod
+    def _rank_detectors(enabled: list[str], behavior: dict[str, Any]) -> list[tuple[str, float]]:
+        """Score detectors by relevance to the observed behaviour/surface."""
+        focus_to_detectors = {
+            "admin": ("auth", "idor"), "auth": ("auth", "jwt"),
+            "account": ("idor", "auth"), "payment": ("idor", "auth"),
+            "file": ("ssrf", "xss"), "api": ("idor", "ssrf", "graphql", "cors"),
+            "graphql": ("graphql",), "idor_prone": ("idor",),
+            "redirect": ("open_redirect",), "debug": ("secrets", "ssrf", "subdomain_takeover"),
         }
-
-        for name, module_path in detector_map.items():
-            if not modules_conf.get(name, False):
-                continue
-
-            logger.info(f"Running detector: {name}")
-            try:
-                module_name, class_name = module_path.rsplit(".", 1)
-                import importlib
-                mod = importlib.import_module(module_name)
-                detector_cls = getattr(mod, class_name)
-                detector = detector_cls(
-                    rate_limiter=self.rate_limiter,
-                    waf_bypass=self.waf_bypass,
-                    scope_loader=self.scope_loader,
-                    browser=self.browser,
-                )
-                results = await detector.run(self.state)
-                for finding in results:
-                    if finding.get("confidence", 0) >= threshold:
-                        self.state.findings.append(finding)
-                    else:
-                        self.state.weak_signals.append(finding)
-            except Exception as e:
-                logger.error(f"Detector {name} failed: {e}")
-                self.state.errors.append(f"detector.{name}: {str(e)}")
+        scores: dict[str, float] = {name: 0.0 for name in enabled}
+        for area in behavior.get("focus_areas", []) or []:
+            name = area.get("area") if isinstance(area, dict) else area
+            weight = float(area.get("score", 1.0)) if isinstance(area, dict) else 1.0
+            for det in focus_to_detectors.get(str(name), ()):  # type: ignore[arg-type]
+                if det in scores:
+                    scores[det] += weight
+        mechanisms = set(behavior.get("mechanisms", []) or [])
+        if "token_or_jwt" in mechanisms and "jwt" in scores:
+            scores["jwt"] += 1.5
+        if "oauth_or_sso" in mechanisms:
+            for det in ("auth", "open_redirect"):
+                if det in scores:
+                    scores[det] += 1.0
+        # Stable order: relevance desc, then original config order.
+        order = {name: i for i, name in enumerate(enabled)}
+        return sorted(scores.items(), key=lambda kv: (-kv[1], order.get(kv[0], 99)))
 
     async def _run_correlate(self) -> None:
         """Correlation phase: chain weak signals into higher-severity findings."""
@@ -629,5 +782,6 @@ class Orchestrator:
             "agentic_decisions": len(self.state.agentic_decisions),
             "ai_token_usage": self.state.ai_token_usage,
             "phase_health": self.state.phase_health,
+            "phase_progress": self._phase_progress,
             "rate_limiter": self.rate_limiter.get_stats() if self.rate_limiter else {},
         }

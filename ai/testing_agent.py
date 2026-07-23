@@ -348,6 +348,7 @@ class TestingAgent:
                 monitor.cancel()
                 await asyncio.gather(monitor, return_exceptions=True)
         setattr(scan_state, "ai_token_usage", dict(self.client.usage))
+        self._record_reasoning(scan_state, phase="ai_test")
         logger.info("AI planning tokens: prompt=%d estimated_prompt=%d completion=%d total=%d requests=%d started=%d failed=%d",
                     self.client.usage["prompt_tokens"], self.client.usage["prompt_tokens_estimated"],
                     self.client.usage["completion_tokens"], self.client.usage["total_tokens"], self.client.usage["requests"],
@@ -380,6 +381,26 @@ class TestingAgent:
                             usage["total_tokens"], usage["requests"])
         except asyncio.CancelledError:
             return
+
+    def _record_reasoning(self, scan_state: Any, *, phase: str) -> None:
+        """Move captured model reasoning traces onto the scan state.
+
+        These power the dashboard "AI Reasoning" view and the report's
+        explainability section — the *why* behind each planned probe.
+        """
+        traces = self.client.drain_traces()
+        if not traces:
+            return
+        existing = list(getattr(scan_state, "ai_reasoning_traces", []) or [])
+        for trace in traces:
+            existing.append({
+                "phase": phase,
+                "agent": trace.get("label", ""),
+                "model": trace.get("model", self.config.model),
+                "text": trace.get("text", ""),
+                "ts": trace.get("ts"),
+            })
+        setattr(scan_state, "ai_reasoning_traces", existing[-300:])
 
     def _fallback_probes(self, targets: list[dict[str, Any]]) -> list[PlannedProbe]:
         """Generate low-impact probes when an LLM is unavailable or malformed."""

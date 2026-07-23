@@ -22,7 +22,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT">
-  <img src="https://img.shields.io/badge/version-3.1.0-orange?style=flat-square" alt="Version 3.1.0">
+  <img src="https://img.shields.io/badge/version-3.2.0-orange?style=flat-square" alt="Version 3.2.0">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square" alt="Platform">
 </p>
 
@@ -38,21 +38,35 @@
 
 ## What is HunterEngine?
 
-HunterEngine **v3** is an automated bug bounty engine built around **hierarchical agents**:
+HunterEngine **v3** is an automated bug bounty engine that runs the **classic
+8-step penetration-testing methodology** end-to-end, with an AI reasoning step
+in **every** phase and hierarchical agents doing the work:
 
-1. **ReconAgent** — passive recon (subdomains, DNS, historical URLs)
-2. **ActiveReconAgent** — live probing + tech fingerprinting
-3. **EnumerationAgent** — crawl / JS / GraphQL / params
-4. **VulnHuntAgent** — nests specialist hunters (IDOR, SSTI, request smuggling, XSS, …)
+1. **Reconnaissance** — passive assets (subdomains, DNS, historical URLs)
+2. **Scanning & Enumeration** — live probing, tech fingerprint, crawl, JS/GraphQL/params
+3. **Threat Modeling** — scored attack-surface + behaviour model + AI plan
+4. **Vulnerability Analysis** — behaviour-driven classic detectors (run concurrently)
+5. **Exploitation** — nested AI hunters plan/execute non-destructive validation probes
+6. **Post-Exploitation** — non-destructive impact & chainability assessment
+7. **Correlation & Chaining** — weak signals → higher-severity composites
+8. **Reporting** — AI triage/enrichment → Markdown / HTML / HackerOne / Bugcrowd
 
-Classic detectors, correlation, local AI triage, and multi-format reports still run after the agent pipeline.
+Start, stop, and watch the whole pipeline live from the **web console**. Every
+phase records an explainable AI decision; safety gates (scope, read-only
+methods, rate/budget limits, circuit breakers) remain authoritative throughout.
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Hierarchical agents** | Recon → active recon → enumeration → nested vuln hunters |
+| **8-step methodology** | Recon · Scanning/Enum · Threat Modeling · Vuln Analysis · Exploitation · Post-Exploitation · Correlation · Reporting |
+| **MCP server** | Drive HunterEngine from Claude Desktop / Claude Code — Claude starts scans and reasons over findings, reasoning traces, and the behaviour model |
+| **AI in every phase** | Each step emits an explainable AI decision + rationale (deterministic by default, optional local LLM) |
+| **Dashboard scan control** | Start / stop / abort scans from the web console with a live 8-step progress stepper |
+| **Fast, behaviour-driven detection** | Detectors are prioritized by the threat model and run concurrently instead of one-at-a-time |
+| **Non-destructive post-exploitation** | AI ranks blast radius, chainability, and attacker gain without sending exploit traffic |
 | **Local AI bug hunt** | Ollama / Qwen3 reasoning plans scoped probes (not report fluff) |
+| **Explainable reasoning** | Captures the model's thinking traces + step-by-step triage (exploitability, impact, FP risk) per finding |
 | **Nested hunters** | XSS, IDOR, SSTI, SSRF, auth, open redirect, request smuggling, CORS, JWT |
 | **Browser auto-crawl** | Playwright navigator: clicks, forms, XHR/fetch, SPA routes |
 | **15 classic detectors** | Rule-based modules run after AI testing |
@@ -64,17 +78,18 @@ Classic detectors, correlation, local AI triage, and multi-format reports still 
 | **Black-box / grey-box profiles** | Explicit testing posture with request budgets and circuit breakers |
 | **Local security RAG** | Ingest PDFs, blogs, Markdown, text, and HTML for assessment context |
 | **Evidence-aware reports** | Per-scope folders, per-finding HTML pages, and Eyewitness/Gowitness images |
-| **Web dashboard** | Config + AI Health check without editing YAML by hand |
+| **Operational web dashboard** | Live AI-usage navbar + tabs for reasoning/thinking, behaviour analysis, findings, domain learning, settings & scope |
 | **Docker (Ollama external)** | App containerized; Ollama stays on the host |
-| **Per-domain learning** | Behaviour profiles improve hunter order and path ranking per site |
+| **Per-domain learning** | Behaviour profiles improve hunter order and path ranking per site; tracks success rate, hit rate, risk score, and trends |
+| **Scored behaviour analysis** | Attack-surface scoring, IDOR/state-change detection, auth posture, and a ranked focus-area plan |
 
 ---
 
-## Architecture (v3.1)
+## Architecture (v3.2)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                   HUNTERENGINE v3.1                                             │
+│                                   HUNTERENGINE v3.2                                             │
 ├──────────────────────────────────────────────────────────────────────────────────────────────┤
 │  INPUT / SAFETY                                                                                 │
 │  scope.yaml + --target ──▶ ScopeLoader ──▶ URL/host normalization ──▶ out-of-scope filters    │
@@ -202,7 +217,8 @@ failed host does not abort the remaining assessment.
 # Full agent pipeline
 python main.py scan
 
-# Web dashboard (config + AI health button) — preferred over hand-editing YAML
+# Operational web dashboard — reasoning/thinking, behaviour analysis, findings,
+# domain learning, live AI-usage navbar, plus config & scope editing
 python main.py dashboard
 # → http://127.0.0.1:8787
 
@@ -212,19 +228,19 @@ python main.py ai-health
 # Full scan + visible browser enumeration
 python main.py scan --auto-crawl --headed
 
-# Phase-only (agents)
+# Phase-only — classic 8-step names
 python main.py scan --phase recon
-python main.py scan --phase active_recon
-python main.py scan --phase enumeration
-python main.py scan --phase ai_test
+python main.py scan --phase scanning
+python main.py scan --phase threat_model
+python main.py scan --phase exploitation
 
 # Explicit testing posture (grey-box requires written authorization)
 python main.py scan --profile blackbox
 python main.py scan --profile greybox
 
-# Classic detectors / report triage
-python main.py scan --phase detect
-python main.py scan --phase ai
+# Vulnerability analysis (detectors) / reporting triage
+python main.py scan --phase vuln_analysis
+python main.py scan --phase reporting
 
 # Standalone browser crawl
 python main.py crawl https://target.com
@@ -251,7 +267,7 @@ ollama pull qwen3:4b
 
 # App + dashboard (Ollama external)
 docker compose up -d --build
-# Dashboard: http://localhost:8787  → click Health check
+# Dashboard: http://localhost:8787  → Overview / Reasoning / Behaviour / Findings tabs
 
 # One-off scan
 docker compose run --rm hunterengine python main.py ai-health
@@ -392,16 +408,16 @@ python main.py domains
 
 | Command / flag | Description |
 |----------------|-------------|
-| `scan` | Full pipeline (all agents + detect + report) |
-| `scan --phase recon` | Passive recon agent only |
-| `scan --phase active_recon` | Live probe + tech FP agent |
-| `scan --phase crawl` / `enumeration` / `enum` | Enumeration agent |
-| `scan --phase ai_test` / `vuln` | Nested AI vuln hunters |
+| `scan` | Full classic 8-step pipeline |
+| `scan --phase recon` | 1 · Reconnaissance (passive) |
+| `scan --phase scanning` / `active_recon` | 2 · Scanning & enumeration |
+| `scan --phase threat_model` | 3 · Threat modeling (scored surface + AI plan) |
+| `scan --phase vuln_analysis` / `detect` | 4 · Vulnerability analysis (behaviour-driven detectors) |
+| `scan --phase exploitation` / `ai_test` / `vuln` | 5 · Exploitation (safe AI validation) |
+| `scan --phase post_exploit` | 6 · Post-exploitation (non-destructive impact) |
+| `scan --phase correlation` / `correlate` | 7 · Correlation & chaining |
+| `scan --phase reporting` / `report` | 8 · Reporting (AI triage + reports) |
 | `scan --profile blackbox|greybox` | Select the authorized testing posture |
-| `scan --phase detect` | Classic detectors |
-| `scan --phase correlate` | Weak-signal chaining |
-| `scan --phase ai` | Report triage enrichment (not hunting) |
-| `scan --phase report` | Generate reports |
 | `scan --auto-crawl` | Enable browser auto-navigator in enumeration |
 | `scan --headed` | Show browser window |
 | `scan --no-enum` | Skip subdomain enum; use scope domains only |
@@ -418,7 +434,8 @@ python main.py domains
 | `checkpoints` | List saved checkpoints |
 | `check-tools` | External tools + httpx resolution |
 | `ai-health` | Probe Ollama daemon + model (+ chat probe) |
-| `dashboard` | Web UI for settings/scope + Health check button |
+| `dashboard` | Operational web console: start/stop scans, reasoning/thinking, behaviour, findings, learning, AI-usage navbar, settings & scope |
+| `mcp` | Run the MCP server (stdio) so Claude Desktop / Claude Code can drive the engine |
 | `domains` | List per-domain learning profiles |
 | `knowledge-ingest <path>` | Index a PDF, blog export, text file, or directory |
 | `knowledge-search <query>` | Search the local knowledge index |
@@ -476,7 +493,10 @@ hunterengine/
 ├── main.py                     # CLI (Typer) — all features wired here
 ├── Dockerfile                  # App image (no Ollama)
 ├── docker-compose.yml          # App + volumes; Ollama on host
-├── dashboard/                  # Web config UI + AI health button
+├── dashboard/                  # Operational web console (reasoning, behaviour, findings, learning, usage)
+│   └── scan_manager.py         # Background scan runner for the dashboard/MCP
+├── integrations/               # MCP server (Claude Desktop / Claude Code)
+│   └── mcp_server.py           # HunterEngineTools + FastMCP wiring
 ├── config/
 │   ├── scope.yaml
 │   ├── settings.yaml
@@ -498,11 +518,11 @@ hunterengine/
 │   │   └── vuln_agent.py
 │   ├── subagents/              # Nested vuln hunters
 │   ├── testing_agent.py        # Probe planner / executor
-│   ├── behavior.py             # Auth / SPA / WAF hypotheses
+│   ├── behavior.py             # Scored attack surface, auth posture, focus areas
 │   ├── ollama_client.py
 │   └── local_reasoner.py       # Report triage only
 ├── memory/
-│   ├── domain_learner.py       # Per-domain behaviour profiles
+│   ├── domain_learner.py       # Per-domain profiles + learning analytics
 │   └── …
 ├── knowledge/                  # Local RAG index
 ├── crawl/  recon/  detection/  confidence/  proxy/  reporting/
@@ -623,17 +643,31 @@ accounts or submit signup forms.
 ### AI, behavior analysis, and learning
 
 The AI testing phase combines specialist planning with deterministic safeguards.
-Before probing, it ranks endpoints, identifies likely authentication mechanisms
-(session, token/JWT, OAuth/SSO), finds signup candidates, and retrieves relevant
-RAG chunks. Each phase records success/failure telemetry and carries recent
-learning events into later AI prompts. **Per-domain profiles** under
-`data/domain_profiles/` remember which hunters and paths paid off on that host
-so later visits reorder specialists and boost interesting routes. Model failures
-are isolated per agent; scope, rate limits, request budgets, and circuit breakers
-remain authoritative. Use `python main.py ai-health` or the dashboard **Health
-check** button before a hunt. Scan output includes prompt, completion,
-total-token, and request counts for the testing model; usage is persisted in
-checkpoints. For unusual applications, `ai.testing.generated_agent: true`
+Before probing, it ranks endpoints and runs a **scored behaviour analysis**:
+authentication mechanisms (session, token/JWT, OAuth/SSO), signup candidates, an
+attack-surface score across sensitive categories (admin, payment, file, debug,
+IDOR-prone, …), object-reference and state-changing detection, auth posture from
+401/403 ratios, and a ranked **focus-area plan** that maps surface to suggested
+hunters. It then retrieves relevant RAG chunks for context.
+
+Reasoning is **explainable**: the model's thinking traces are captured (not
+discarded), and triage runs a step-by-step process (evidence → vuln class →
+exploitability → impact → false-positive risk → verdict) that annotates each
+finding with `reasoning_steps`, `exploitability`, `impact_area`, and
+`attack_prerequisites`. Traces and a per-run reasoning summary are persisted in
+checkpoints and shown in the dashboard's **Reasoning & Thinking** tab.
+
+Each phase records success/failure telemetry and carries recent learning events
+into later AI prompts. **Per-domain profiles** under `data/domain_profiles/`
+remember which hunters and paths paid off on that host so later visits reorder
+specialists and boost interesting routes, and now track success rate, hit rate,
+risk score, per-class effectiveness, and a finding-history trend (aggregated in
+the dashboard's **Domain Learning** tab). Model failures are isolated per agent;
+scope, rate limits, request budgets, and circuit breakers remain authoritative.
+Use `python main.py ai-health` or the dashboard **Overview → AI health** panel
+before a hunt. Scan output includes prompt, completion, total-token, thinking,
+and request counts for the testing model — surfaced live in the dashboard navbar
+and persisted in checkpoints. For unusual applications, `ai.testing.generated_agent: true`
 enables an ephemeral planner that returns the same structured probe format as
 built-in agents. Generated code is treated as text only and is never imported or
 executed; every probe still passes the deterministic safety gate.
@@ -645,6 +679,49 @@ python main.py dashboard
 # or
 docker compose up -d
 ```
+
+### MCP server — drive HunterEngine from Claude Desktop / Claude Code
+
+Instead of using a local LLM as the token backend, expose HunterEngine as an
+**MCP server** and let Claude be the reasoning brain that drives it. Claude
+starts scans, watches the 8-step pipeline, and reads findings, the behaviour
+model, and the engine's own reasoning traces back to decide what to do next.
+All active testing stays behind scope + safety gates.
+
+```bash
+pip install "mcp>=1.2"          # or: pip install -e ".[mcp]"
+python main.py mcp              # runs the server on stdio (logs go to stderr)
+```
+
+**Claude Code** (one command registers it):
+
+```bash
+claude mcp add hunterengine -- python /absolute/path/to/HunterEngine/main.py mcp
+```
+
+**Claude Desktop** — add to `claude_desktop_config.json`
+(see [`integrations/claude_desktop_config.example.json`](integrations/claude_desktop_config.example.json)):
+
+```json
+{
+  "mcpServers": {
+    "hunterengine": {
+      "command": "python",
+      "args": ["/absolute/path/to/HunterEngine/main.py", "mcp"]
+    }
+  }
+}
+```
+
+Tools exposed: `methodology`, `get_scope`, `ai_health`, `start_scan`,
+`scan_status`, `stop_scan`, `run_summary`, `list_findings`, `get_reasoning`,
+`get_behavior`, `list_domains`. A typical Claude prompt: *"Scan app.example.com
+(I'm authorized), watch it finish, then summarize the high-severity findings and
+their impact chains."*
+
+> Note: Claude **Desktop** can only *drive* HunterEngine via MCP — it can't act
+> as a completion backend. To use Claude as a raw LLM provider instead, wire the
+> Anthropic API or `claude -p` behind the `ai.provider` switch (not built in yet).
 
 ### Local RAG data pool
 

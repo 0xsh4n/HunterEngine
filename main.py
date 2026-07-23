@@ -5,12 +5,14 @@ HunterEngine v3 — Automated Bug Bounty Reconnaissance & Detection
 Usage:
     python main.py scan                           # Full pipeline scan
     python main.py scan --auto-crawl --headed     # Full scan with visible browser auto-crawl
-    python main.py scan --phase recon             # Passive recon agent
-    python main.py scan --phase active_recon      # Live probe + tech fingerprint agent
-    python main.py scan --phase enumeration       # Crawl / endpoint enumeration agent
-    python main.py scan --phase ai_test           # Nested AI vuln hunters (Ollama)
-    python main.py scan --phase detect            # Classic detectors
-    python main.py scan --phase ai                # Local AI report enrichment
+    python main.py scan --phase recon             # 1 Recon (passive)
+    python main.py scan --phase scanning          # 2 Scanning & enumeration (active recon)
+    python main.py scan --phase threat_model      # 3 Threat modeling (scored surface + AI plan)
+    python main.py scan --phase vuln_analysis     # 4 Vulnerability analysis (behaviour-driven detectors)
+    python main.py scan --phase exploitation      # 5 Exploitation (safe AI validation probes)
+    python main.py scan --phase post_exploit      # 6 Post-exploitation (non-destructive impact)
+    python main.py scan --phase correlation       # 7 Correlation & chaining
+    python main.py scan --phase reporting         # 8 Reporting (AI triage + reports)
     python main.py scan --resume                  # Resume from latest checkpoint
     python main.py checkpoints                    # List saved checkpoints
     python main.py crawl https://target.com       # Standalone browser auto-crawl (ZAP-style)
@@ -19,7 +21,7 @@ Usage:
     python main.py history                        # Show scan history
     python main.py check-tools                    # Check installed tools (resolves PD vs pip httpx)
     python main.py ai-health                      # Probe Ollama / configured model
-    python main.py dashboard                      # Web UI for config + health check
+    python main.py dashboard                      # Web console: start/stop scans, reasoning, findings
     python main.py domains                        # Show per-domain learning profiles
     python main.py knowledge-ingest ./research    # Index local pentest docs into RAG
     python main.py knowledge-search "SSRF"        # Search the local knowledge index
@@ -109,7 +111,7 @@ def print_banner() -> None:
  ███████╗██║ ╚████║╚██████╔╝██║██║ ╚████║███████╗
  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝╚══════╝
     """
-    console.print(Panel(banner, title="v3.1.0", border_style="blue"))
+    console.print(Panel(banner, title="v3.2.0", border_style="blue"))
 
 
 # ── Commands ──────────────────────────────────────────────────────────────
@@ -123,8 +125,9 @@ def scan(
     phase: str = typer.Option(
         "",
         help=(
-            "Run specific phase: recon, active_recon, crawl|enumeration, "
-            "ai_test|vuln, detect, correlate, ai, report"
+            "Run one of the 8 classic steps: recon, scanning, threat_model, "
+            "vuln_analysis, exploitation, post_exploit, correlation, reporting "
+            "(internal aliases: active_recon, crawl, detect, ai_test, correlate, ai, report)"
         ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
@@ -630,7 +633,8 @@ def dashboard(
     settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
     scope: str = typer.Option("config/scope.yaml", help="Path to scope.yaml"),
 ) -> None:
-    """Launch the web dashboard for config + AI health (Ollama stays external)."""
+    """Launch the web console: start/stop scans, watch the 8-step pipeline, AI
+    reasoning/thinking, behaviour analysis, findings, learning, config & scope."""
     setup_logging(False)
     print_banner()
     console.print(
@@ -645,6 +649,30 @@ def dashboard(
     from dashboard.app import run_dashboard
 
     run_dashboard(host=host, port=port, settings_path=settings, scope_path=scope)
+
+
+@app.command()
+def mcp(
+    settings: str = typer.Option("config/settings.yaml", help="Path to settings.yaml"),
+    scope: str = typer.Option("config/scope.yaml", help="Path to scope.yaml"),
+) -> None:
+    """Run the HunterEngine MCP server (stdio) for Claude Desktop / Claude Code.
+
+    Claude becomes the reasoning brain that drives the engine: it starts scans,
+    watches the 8-step pipeline, and reads findings/reasoning/behaviour back.
+
+    Claude Code:   claude mcp add hunterengine -- python main.py mcp
+    Claude Desktop: add to claude_desktop_config.json (see README → MCP server).
+    Logs go to stderr so they never corrupt the stdio JSON-RPC stream.
+    """
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+    from integrations.mcp_server import run_stdio
+
+    try:
+        run_stdio(settings_path=settings, scope_path=scope)
+    except ImportError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -698,6 +726,38 @@ def _safe_text(value: object, default: str = "") -> str:
     return text or default
 
 
+def _print_reasoning_summary(summary: object) -> None:
+    """Show the AI triage reasoning summary (top risks + what needs review)."""
+    if not isinstance(summary, dict) or not summary:
+        return
+    top = summary.get("top_risks") or []
+    needs = summary.get("needs_review") or []
+    if not top and not needs:
+        return
+    table = Table(title="AI Reasoning Summary", show_header=True)
+    table.add_column("Top risk", style="white")
+    table.add_column("Sev", width=9)
+    table.add_column("Conf", width=6)
+    table.add_column("Prio", width=5)
+    for risk in top[:5]:
+        if not isinstance(risk, dict):
+            continue
+        try:
+            conf = f"{float(risk.get('confidence', 0)):.0%}"
+        except (TypeError, ValueError):
+            conf = "0%"
+        table.add_row(
+            _safe_text(risk.get("title"))[:60],
+            _safe_text(risk.get("severity", "info")).upper(),
+            conf,
+            _safe_text(risk.get("priority", "—")),
+        )
+    if top:
+        console.print(table)
+    if needs:
+        console.print(f"[yellow]Needs manual review:[/yellow] {', '.join(_safe_text(n) for n in needs[:8])}")
+
+
 def print_results(state, elapsed: float) -> None:
     """Print a rich dashboard of scan results."""
     try:
@@ -730,8 +790,12 @@ def print_results(state, elapsed: float) -> None:
         stats_table.add_row("AI model requests", str(token_usage.get("requests", 0)))
         stats_table.add_row("AI requests started", str(token_usage.get("requests_started", 0)))
         stats_table.add_row("AI failed requests", str(token_usage.get("failed_requests", 0)))
+        stats_table.add_row("AI reasoning traces", str(_safe_len(getattr(state_obj, "ai_reasoning_traces", None))))
+        stats_table.add_row("AI thinking chars", str(token_usage.get("thinking_chars", 0)))
         stats_table.add_row("Errors", str(len(errors)))
         console.print(Panel(stats_table, title="Scan Statistics", border_style="green"))
+
+        _print_reasoning_summary(getattr(state_obj, "ai_reasoning_summary", None))
 
         if findings:
             findings_table = Table(title=f"Findings ({len(findings)} total)")
